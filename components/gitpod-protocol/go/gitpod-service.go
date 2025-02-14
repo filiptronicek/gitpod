@@ -61,7 +61,6 @@ type APIInterface interface {
 	ClosePort(ctx context.Context, workspaceID string, port float32) (err error)
 	UpdateGitStatus(ctx context.Context, workspaceID string, status *WorkspaceInstanceRepoStatus) (err error)
 	GetWorkspaceEnvVars(ctx context.Context, workspaceID string) (res []*EnvVar, err error)
-	GetEnvVars(ctx context.Context) (res []*EnvVar, err error)
 	SetEnvVar(ctx context.Context, variable *UserEnvVarValue) (err error)
 	DeleteEnvVar(ctx context.Context, variable *UserEnvVarValue) (err error)
 	HasSSHPublicKey(ctx context.Context) (res bool, err error)
@@ -179,8 +178,6 @@ const (
 	FunctionOpenPort FunctionName = "openPort"
 	// FunctionClosePort is the name of the closePort function
 	FunctionClosePort FunctionName = "closePort"
-	// FunctionGetEnvVars is the name of the getEnvVars function
-	FunctionGetEnvVars FunctionName = "getEnvVars"
 	// FunctionSetEnvVar is the name of the setEnvVar function
 	FunctionSetEnvVar FunctionName = "setEnvVar"
 	// FunctionDeleteEnvVar is the name of the deleteEnvVar function
@@ -1088,24 +1085,6 @@ func (gp *APIoverJSONRPC) GetWorkspaceEnvVars(ctx context.Context, workspaceID s
 	return
 }
 
-// GetEnvVars calls getEnvVars on the server
-func (gp *APIoverJSONRPC) GetEnvVars(ctx context.Context) (res []*EnvVar, err error) {
-	if gp == nil {
-		err = errNotConnected
-		return
-	}
-	var _params []interface{}
-
-	var result []*EnvVar
-	err = gp.C.Call(ctx, "getEnvVars", _params, &result)
-	if err != nil {
-		return
-	}
-	res = result
-
-	return
-}
-
 // SetEnvVar calls setEnvVar on the server
 func (gp *APIoverJSONRPC) SetEnvVar(ctx context.Context, variable *UserEnvVarValue) (err error) {
 	if gp == nil {
@@ -1786,8 +1765,16 @@ type WorkspaceInstanceConditions struct {
 
 // WorkspaceInstanceConfiguration is the WorkspaceInstanceConfiguration message type
 type WorkspaceInstanceConfiguration struct {
-	FeatureFlags []string `json:"featureFlags,omitempty"`
-	TheiaVersion string   `json:"theiaVersion,omitempty"`
+	FeatureFlags []string                    `json:"featureFlags,omitempty"`
+	TheiaVersion string                      `json:"theiaVersion,omitempty"`
+	IDEConfig    *WorkspaceInstanceIDEConfig `json:"ideConfig,omitempty"`
+}
+
+// WorkspaceInstanceIDEConfig is the ide config information of a workspace instance
+type WorkspaceInstanceIDEConfig struct {
+	UseLatest     bool   `json:"useLatest,omitempty"`
+	IDE           string `json:"ide,omitempty"`
+	PreferToolbox bool   `json:"preferToolbox,omitempty"`
 }
 
 // WorkspaceInstanceRepoStatus is the WorkspaceInstanceRepoStatus message type
@@ -1899,8 +1886,7 @@ type VSCodeConfig struct {
 
 // Configuration is the Configuration message type
 type Configuration struct {
-	DaysBeforeGarbageCollection float64 `json:"daysBeforeGarbageCollection,omitempty"`
-	GarbageCollectionStartDate  float64 `json:"garbageCollectionStartDate,omitempty"`
+	IsDedicatedInstallation bool `json:"isDedicatedInstallation,omitempty"`
 }
 
 // EnvVar is the EnvVar message type
@@ -1981,6 +1967,7 @@ type UpdateOwnAuthProviderParams struct {
 type CreateWorkspaceOptions struct {
 	StartWorkspaceOptions
 	ContextURL                         string `json:"contextUrl,omitempty"`
+	ProjectId                          string `json:"projectId,omitempty"`
 	OrganizationId                     string `json:"organizationId,omitempty"`
 	IgnoreRunningWorkspaceOnSameCommit bool   `json:"ignoreRunningWorkspaceOnSameCommit,omitempty"`
 	ForceDefaultConfig                 bool   `json:"forceDefaultConfig,omitempty"`
@@ -2057,6 +2044,7 @@ type IDESettings struct {
 	UseDesktopIde     bool   `json:"useDesktopIde,omitempty"`
 	DefaultDesktopIde string `json:"defaultDesktopIde,omitempty"`
 	UseLatestVersion  bool   `json:"useLatestVersion"`
+	PreferToolbox     bool   `json:"preferToolbox"`
 }
 
 // EmailNotificationSettings is the EmailNotificationSettings message type
@@ -2071,10 +2059,11 @@ type Identity struct {
 	AuthProviderID string `json:"authProviderId,omitempty"`
 
 	// This is a flag that triggers the HARD DELETION of this entity
-	Deleted      bool     `json:"deleted,omitempty"`
-	PrimaryEmail string   `json:"primaryEmail,omitempty"`
-	Readonly     bool     `json:"readonly,omitempty"`
-	Tokens       []*Token `json:"tokens,omitempty"`
+	Deleted        bool     `json:"deleted,omitempty"`
+	PrimaryEmail   string   `json:"primaryEmail,omitempty"`
+	Readonly       bool     `json:"readonly,omitempty"`
+	Tokens         []*Token `json:"tokens,omitempty"`
+	LastSigninTime string   `json:"lastSigninTime,omitempty"`
 }
 
 // User is the User message type

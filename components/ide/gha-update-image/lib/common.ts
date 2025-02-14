@@ -7,9 +7,14 @@ import path from "path";
 import yaml from "yaml";
 import { z } from "zod";
 
-const pathToProjectRoot = path.resolve(__dirname, "../../../../");
+export const pathToProjectRoot = path.resolve(__dirname, "../../../../");
 
-export const pathToOutput = path.resolve("/tmp/__gh_output.txt");
+const pathToOutput = path.resolve("/tmp/__gh_output.txt");
+
+export const appendGitHubOutput = async (kv: string) => {
+    console.log("Appending to GitHub output:", kv);
+    return await $`echo ${kv} >> ${pathToOutput}`;
+};
 
 // WORKSPACE.yaml
 export const pathToWorkspaceYaml = path.resolve(pathToProjectRoot, "WORKSPACE.yaml");
@@ -48,26 +53,45 @@ export const pathToBackendPluginGradleStable = path.resolve(
     "components/ide/jetbrains/backend-plugin/gradle-stable.properties",
 );
 
+// gradle-latest.properties
+export const pathToBackendPluginGradleLatest = path.resolve(
+    pathToProjectRoot,
+    "components/ide/jetbrains/backend-plugin/gradle-latest.properties",
+);
+
+export const pathToBackendPluginDir = path.resolve(pathToProjectRoot, "components/ide/jetbrains/backend-plugin");
+
 // ide-configmap.json
 export const pathToConfigmap = path.resolve(
     pathToProjectRoot,
     "install/installer/pkg/components/ide-service/ide-configmap.json",
 );
+
+const IDEOptionSchema = z.object({
+    image: z.string(),
+    imageLayers: z.array(z.string()),
+    versions: z.array(
+        z.object({
+            version: z.string(),
+            image: z.string(),
+            imageLayers: z.array(z.string()),
+        }),
+    ),
+});
 const ideConfigmapJsonSchema = z.object({
     supervisorImage: z.string(),
     ideOptions: z.object({
         options: z.object({
-            code: z.object({
-                image: z.string(),
-                imageLayers: z.array(z.string()),
-                versions: z.array(
-                    z.object({
-                        version: z.string(),
-                        image: z.string(),
-                        imageLayers: z.array(z.string()),
-                    }),
-                ),
-            }),
+            code: IDEOptionSchema,
+            intellij: IDEOptionSchema,
+            goland: IDEOptionSchema,
+            pycharm: IDEOptionSchema,
+            phpstorm: IDEOptionSchema,
+            rubymine: IDEOptionSchema,
+            webstorm: IDEOptionSchema,
+            rider: IDEOptionSchema,
+            clion: IDEOptionSchema,
+            rustrover: IDEOptionSchema,
         }),
     }),
 });
@@ -83,8 +107,7 @@ export const readIDEConfigmapJson = async () => {
     };
 };
 
-// installer versions
-export const getLatestInstallerVersions = async (version?: string) => {
+const getInstallerVersion = async (version: string | undefined) => {
     const v = version ? version : "main-gha.";
     let tagInfo: string;
     try {
@@ -101,17 +124,20 @@ export const getLatestInstallerVersions = async (version?: string) => {
         await $`echo '${tagInfo}' | awk '{ print $2 }' | grep -o 'main-gha.[0-9]*' | cut -d'/' -f3`
             .text()
             .catch((e) => {
-                throw new Error("Failed to parse installer version from git tag", e);
+                throw new Error("Failed to parse installer version from git tag: " + e);
             });
-    // exec command below to see results
-    // ```
-    // $ docker run --rm eu.gcr.io/gitpod-core-dev/build/versions:main-gha.25759 cat /versions.yaml | yq r -
-    // ```
+    return installationVersion.replaceAll("\n", "");
+};
+
+// installer versions
+export const getLatestInstallerVersions = async (version?: string) => {
+    const installationVersion = await getInstallerVersion(version);
+    console.log("Fetching installer versions for", installationVersion);
     const versionData =
-        await $`docker run --rm eu.gcr.io/gitpod-core-dev/build/versions:${installationVersion.trim()} cat /versions.yaml`
+        await $`docker run --rm eu.gcr.io/gitpod-core-dev/build/versions:${installationVersion} cat /versions.yaml`
             .text()
             .catch((e) => {
-                throw new Error("Failed to fetch versions.yaml from latest installer", e);
+                throw new Error("Failed to get installer versions: " + e);
             });
 
     const versionObj = z.object({ version: z.string() });
@@ -135,6 +161,8 @@ export const getLatestInstallerVersions = async (version?: string) => {
                         intellijLatest: versionObj,
                         jbBackendPlugin: versionObj,
                         jbBackendPluginLatest: versionObj,
+                        jbBackendPluginRider: versionObj,
+                        jbBackendPluginLatestRider: versionObj,
                         jbLauncher: versionObj,
                         phpstorm: versionObj,
                         phpstormLatest: versionObj,
@@ -153,4 +181,37 @@ export const getLatestInstallerVersions = async (version?: string) => {
             }),
         })
         .parse(yaml.parse(versionData));
+};
+
+export const renderInstallerIDEConfigMap = async (version?: string) => {
+    const installationVersion = await getInstallerVersion(version);
+    await $`docker run --rm -v /tmp:/tmp eu.gcr.io/gitpod-core-dev/build/installer:${installationVersion} config init --overwrite --log-level=error -c /tmp/gitpod.config.yaml`.catch(
+        (e) => {
+            throw new Error("Failed to render gitpod.config.yaml: " + e);
+        },
+    );
+    const ideConfigMapStr =
+        await $`cat /tmp/gitpod.config.yaml | docker run -i --rm eu.gcr.io/gitpod-core-dev/build/installer:${installationVersion} ide-configmap -c -`
+            .text()
+            .catch((e) => {
+                throw new Error(`Failed to render ide-configmap: ` + e);
+            });
+    const ideConfigmapJsonObj = JSON.parse(ideConfigMapStr);
+    const ideConfigmapJson = ideConfigmapJsonSchema.parse(ideConfigmapJsonObj);
+    return ideConfigmapJson;
+};
+
+export const getIDEVersionOfImage = async (img: string) => {
+    console.log(
+        "Fetching IDE version in image:",
+        `oci-tool fetch image ${img} | jq -r '.config.Labels["io.gitpod.ide.version"]'`,
+    );
+    const version = await $`oci-tool fetch image ${img} | jq -r '.config.Labels["io.gitpod.ide.version"]'`
+        .text()
+        .catch((e) => {
+            throw new Error("Failed to fetch ide version in image: " + e);
+        })
+        .then((str) => str.replaceAll("\n", ""));
+    console.log("IDE version in image:", version);
+    return version;
 };

@@ -5,6 +5,7 @@
 package io.gitpod.jetbrains.remote
 
 import com.intellij.codeWithMe.ClientId
+import com.intellij.codeWithMe.asContextElement
 import com.intellij.ide.BrowserUtil
 import com.intellij.ide.CommandLineProcessor
 import com.intellij.openapi.client.ClientKind
@@ -110,12 +111,12 @@ class GitpodCLIService : RestService() {
     }
 
     private fun withClient(request: FullHttpRequest, context: ChannelHandlerContext, action: suspend (project: Project?) -> Unit): String? {
-        GlobalScope.launch {
-            getClientSessionAndProjectAsync().let { (session, project) ->
-                ClientId.withClientId(session.clientId) {
-                    action(project)
-                    sendOk(request, context)
-                }
+        val scope = CoroutineScope(Dispatchers.Default)
+        scope.launch {
+            val (session, project) = getClientSessionAndProjectAsync()
+            withContext(session.clientId.asContextElement()) {
+                action(project)
+                sendOk(request, context)
             }
         }
         return null

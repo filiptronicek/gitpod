@@ -7,11 +7,13 @@
 import { BUILTIN_INSTLLATION_ADMIN_USER_ID, TeamDB, UserDB } from "@gitpod/gitpod-db/lib";
 import {
     OrgMemberInfo,
-    OrgMemberRole,
     Organization,
     OrganizationSettings,
     TeamMemberRole,
     TeamMembershipInvite,
+    WorkspaceTimeoutDuration,
+    OrgMemberRole,
+    User,
 } from "@gitpod/gitpod-protocol";
 import { IAnalyticsWriter } from "@gitpod/gitpod-protocol/lib/analytics";
 import { ApplicationError, ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
@@ -28,6 +30,13 @@ import { InstallationService } from "../auth/installation-service";
 import { getExperimentsClientForBackend } from "@gitpod/gitpod-protocol/lib/experiments/configcat-server";
 import { runWithSubjectId } from "../util/request-context";
 import { IDEService } from "../ide-service";
+import { StripeService } from "../billing/stripe-service";
+import { AttributionId } from "@gitpod/gitpod-protocol/lib/attribution";
+import { UsageService } from "./usage-service";
+import { CostCenter_BillingStrategy } from "@gitpod/gitpod-protocol/lib/usage";
+import { CreateUserParams, UserAuthentication } from "../user/user-authentication";
+import isURL from "validator/lib/isURL";
+import { merge } from "ts-deepmerge";
 
 @injectable()
 export class OrganizationService {
@@ -40,8 +49,11 @@ export class OrganizationService {
         @inject(IAnalyticsWriter) private readonly analytics: IAnalyticsWriter,
         @inject(InstallationService) private readonly installationService: InstallationService,
         @inject(IDEService) private readonly ideService: IDEService,
+        @inject(StripeService) private readonly stripeService: StripeService,
+        @inject(UsageService) private readonly usageService: UsageService,
         @inject(DefaultWorkspaceImageValidator)
         private readonly validateDefaultWorkspaceImage: DefaultWorkspaceImageValidator,
+        @inject(UserAuthentication) private readonly userAuthentication: UserAuthentication,
     ) {}
 
     async listOrganizations(
@@ -138,6 +150,19 @@ export class OrganizationService {
     }
 
     async createOrganization(userId: string, name: string): Promise<Organization> {
+        // TODO(gpl): Should we use the authorization layer to make this decision?
+        const user = await this.userDB.findUserById(userId);
+        if (!user) {
+            throw new ApplicationError(ErrorCodes.NOT_AUTHENTICATED, `User not authenticated. Please login.`);
+        }
+        const mayCreateOrganization = await this.userAuthentication.mayCreateOrganization(user);
+        if (!mayCreateOrganization) {
+            throw new ApplicationError(
+                ErrorCodes.PERMISSION_DENIED,
+                "Organizational accounts are not allowed to create new organizations",
+            );
+        }
+
         let result: Organization;
         try {
             result = await this.teamDB.transaction(async (db) => {
@@ -186,6 +211,11 @@ export class OrganizationService {
                 }
 
                 await db.deleteTeam(orgId);
+
+                const costCenter = await this.usageService.getCostCenter(userId, orgId);
+                if (costCenter.billingStrategy === CostCenter_BillingStrategy.BILLING_STRATEGY_STRIPE) {
+                    await this.stripeService.cancelCustomerSubscriptions(AttributionId.createFromOrganizationId(orgId));
+                }
 
                 await this.auth.removeAllRelationships(userId, "organization", orgId);
             });
@@ -242,6 +272,19 @@ export class OrganizationService {
     }
 
     public async joinOrganization(userId: string, inviteId: string): Promise<string> {
+        const user = await this.userDB.findUserById(userId);
+        if (!user) {
+            throw new ApplicationError(ErrorCodes.INTERNAL_SERVER_ERROR, `User ${userId} not found`);
+        }
+
+        const mayJoinOrganization = await this.userAuthentication.mayJoinOrganization(user);
+        if (!mayJoinOrganization) {
+            throw new ApplicationError(
+                ErrorCodes.PERMISSION_DENIED,
+                "Organizational accounts are not allowed to join other organizations",
+            );
+        }
+
         // Invites can be used by anyone, as long as they know the invite ID, hence needs no resource guard
         const invite = await this.teamDB.findTeamMembershipInviteById(inviteId);
         if (!invite || invite.invalidationTime !== "") {
@@ -250,6 +293,7 @@ export class OrganizationService {
         if (await this.teamDB.hasActiveSSO(invite.teamId)) {
             throw new ApplicationError(ErrorCodes.NOT_FOUND, "Invites are disabled for SSO-enabled organizations.");
         }
+
         // set skipRoleUpdate=true to avoid member/owner click join link again cause role change
         await runWithSubjectId(SYSTEM_USER, () =>
             this.addOrUpdateMember(SYSTEM_USER_ID, invite.teamId, userId, invite.role, {
@@ -257,6 +301,20 @@ export class OrganizationService {
                 skipRoleUpdate: true,
             }),
         );
+
+        try {
+            // verify the new member if this org is a paying customer
+            if (
+                (await this.stripeService.findUncancelledSubscriptionByAttributionId(
+                    AttributionId.render({ kind: "team", teamId: invite.teamId }),
+                )) !== undefined
+            ) {
+                await this.userService.markUserAsVerified(user, undefined);
+            }
+        } catch (e) {
+            log.warn("Failed to verify new org member", e);
+        }
+
         this.analytics.track({
             userId: userId,
             event: "team_joined",
@@ -267,6 +325,26 @@ export class OrganizationService {
         });
 
         return invite.teamId;
+    }
+
+    /**
+     * Convenience method, analogue to UserService.createUser()
+``
+     */
+    public async createOrgOwnedUser(params: CreateUserParams & { organizationId: string }): Promise<User> {
+        return this.userDB.transaction(async (_, ctx) => {
+            const user = await this.userService.createUser(params, ctx);
+
+            await this.addOrUpdateMember(
+                SYSTEM_USER_ID,
+                params.organizationId,
+                user.id,
+                "member",
+                { flexibleRole: true },
+                ctx,
+            );
+            return user;
+        });
     }
 
     /**
@@ -416,7 +494,7 @@ export class OrganizationService {
         if (typeof settings.defaultWorkspaceImage === "string") {
             const defaultWorkspaceImage = settings.defaultWorkspaceImage.trim();
             if (defaultWorkspaceImage) {
-                await this.validateDefaultWorkspaceImage(userId, defaultWorkspaceImage);
+                await this.validateDefaultWorkspaceImage(userId, defaultWorkspaceImage, orgId);
                 settings = { ...settings, defaultWorkspaceImage };
             } else {
                 settings = { ...settings, defaultWorkspaceImage: null };
@@ -460,10 +538,101 @@ export class OrganizationService {
                 await this.ideService.checkEditorsAllowed(userId, settings.restrictedEditorNames);
             }
         }
+
         if (settings.defaultRole && !TeamMemberRole.isValid(settings.defaultRole)) {
             throw new ApplicationError(ErrorCodes.BAD_REQUEST, "Invalid default role");
         }
-        return this.toSettings(await this.teamDB.setOrgSettings(orgId, settings));
+
+        if (settings.timeoutSettings?.inactivity) {
+            try {
+                WorkspaceTimeoutDuration.validate(settings.timeoutSettings.inactivity);
+            } catch (error) {
+                throw new ApplicationError(ErrorCodes.BAD_REQUEST, `Invalid inactivity timeout: ${error.message}`);
+            }
+        }
+
+        if (settings.onboardingSettings) {
+            if (settings.onboardingSettings.internalLink) {
+                if (settings.onboardingSettings.internalLink.length > 255) {
+                    throw new ApplicationError(ErrorCodes.BAD_REQUEST, "internalLink must be <= 255 characters long");
+                }
+
+                if (
+                    !isURL(settings.onboardingSettings.internalLink, {
+                        require_protocol: true,
+                        host_blacklist: ["localhost", "127.0.0.1", "::1"],
+                    })
+                ) {
+                    throw new ApplicationError(ErrorCodes.BAD_REQUEST, "Invalid internal link");
+                }
+            }
+
+            if (settings.onboardingSettings.recommendedRepositories) {
+                if (settings.onboardingSettings.recommendedRepositories.length > 3) {
+                    throw new ApplicationError(
+                        ErrorCodes.BAD_REQUEST,
+                        "there can't be more than 3 recommendedRepositories",
+                    );
+                }
+                for (const configurationId of settings.onboardingSettings.recommendedRepositories) {
+                    const project = await this.projectsService.getProject(userId, configurationId);
+                    if (!project) {
+                        throw new ApplicationError(ErrorCodes.BAD_REQUEST, `repository ${configurationId} not found`);
+                    }
+                }
+            }
+
+            if (settings.onboardingSettings.welcomeMessage) {
+                const welcomeMessage = settings.onboardingSettings.welcomeMessage;
+
+                if (welcomeMessage.featuredMemberResolvedAvatarUrl) {
+                    throw new ApplicationError(
+                        ErrorCodes.BAD_REQUEST,
+                        "featuredMemberResolvedAvatarUrl is not allowed to be set",
+                    );
+                }
+
+                if (welcomeMessage.featuredMemberId) {
+                    const membership = await this.teamDB.findTeamMembership(welcomeMessage.featuredMemberId, orgId);
+                    if (!membership) {
+                        throw new ApplicationError(ErrorCodes.BAD_REQUEST, "featuredMemberId is invalid");
+                    }
+                    const user = await this.userDB.findUserById(membership.userId);
+                    if (!user) {
+                        throw new ApplicationError(
+                            ErrorCodes.NOT_FOUND,
+                            `user for featuredMemberId ${membership.userId} not found`,
+                        );
+                    }
+                    welcomeMessage.featuredMemberResolvedAvatarUrl = user.avatarUrl;
+                }
+
+                if (welcomeMessage.enabled && (!welcomeMessage.message || welcomeMessage.message.length === 0)) {
+                    throw new ApplicationError(ErrorCodes.BAD_REQUEST, "welcomeMessage must not be empty when enabled");
+                }
+            }
+        }
+
+        const mergeSettings = (
+            currentSettings: OrganizationSettings,
+            partialUpdate: Partial<OrganizationSettings>,
+        ): OrganizationSettings => {
+            // We want to deep-merge columns that are JSON shapes here.
+            // We ignore fields set to undefined, and don't merge arrays to match our API semantics
+            const settings = merge.withOptions(
+                { mergeArrays: false, allowUndefinedOverrides: false },
+                currentSettings,
+                partialUpdate,
+            );
+
+            // roleRestrictions is an exception: override if set
+            if (partialUpdate.roleRestrictions !== undefined) {
+                settings.roleRestrictions = partialUpdate.roleRestrictions;
+            }
+            return settings;
+        };
+
+        return this.toSettings(await this.teamDB.setOrgSettings(orgId, settings, mergeSettings));
     }
 
     private async toSettings(settings: OrganizationSettings = {}): Promise<OrganizationSettings> {
@@ -486,7 +655,42 @@ export class OrganizationService {
         if (settings.defaultRole) {
             result.defaultRole = settings.defaultRole;
         }
+        if (settings.timeoutSettings) {
+            result.timeoutSettings = {
+                denyUserTimeouts: settings.timeoutSettings?.denyUserTimeouts,
+                inactivity: settings.timeoutSettings?.inactivity,
+            };
+        }
+        if (settings.roleRestrictions) {
+            result.roleRestrictions = settings.roleRestrictions;
+        }
+        if (settings.maxParallelRunningWorkspaces) {
+            result.maxParallelRunningWorkspaces = settings.maxParallelRunningWorkspaces;
+        }
+        if (settings.onboardingSettings) {
+            result.onboardingSettings = settings.onboardingSettings;
+        }
+        if (settings.annotateGitCommits) {
+            result.annotateGitCommits = settings.annotateGitCommits;
+        }
+
         return result;
+    }
+
+    /**
+     * To be notified when a project is deleted, so that we can remove it from the list of recommended repositories
+     */
+    public async onProjectDeletion(userId: string, organizationId: string, projectId: string): Promise<void> {
+        const orgSettings = await this.getSettings(userId, organizationId);
+        const repoRecommendations = orgSettings.onboardingSettings?.recommendedRepositories;
+        if (repoRecommendations) {
+            const updatedRepoRecommendations = repoRecommendations.filter((id) => id !== projectId);
+            if (updatedRepoRecommendations.length !== repoRecommendations.length) {
+                await this.updateSettings(userId, organizationId, {
+                    onboardingSettings: { recommendedRepositories: updatedRepoRecommendations },
+                });
+            }
+        }
     }
 
     public async listWorkspaceClasses(userId: string, orgId: string): Promise<SupportedWorkspaceClass[]> {

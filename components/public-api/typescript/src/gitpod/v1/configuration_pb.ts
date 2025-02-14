@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2024 Gitpod GmbH. All rights reserved.
+ * Copyright (c) 2025 Gitpod GmbH. All rights reserved.
  * Licensed under the GNU Affero General Public License (AGPL).
  * See License.AGPL.txt in the project root for license information.
  */
@@ -13,6 +13,30 @@ import type { BinaryReadOptions, FieldList, JsonReadOptions, JsonValue, PartialM
 import { Message, proto3, Timestamp } from "@bufbuild/protobuf";
 import { PaginationRequest, PaginationResponse } from "./pagination_pb.js";
 import { Sort } from "./sorting_pb.js";
+
+/**
+ * @generated from enum gitpod.v1.PrebuildTriggerStrategy
+ */
+export enum PrebuildTriggerStrategy {
+  /**
+   * Default value. Implicitly applies to webhoook-based activation
+   *
+   * @generated from enum value: PREBUILD_TRIGGER_STRATEGY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Default value for newly enabled prebuilds.
+   *
+   * @generated from enum value: PREBUILD_TRIGGER_STRATEGY_ACTIVITY_BASED = 1;
+   */
+  ACTIVITY_BASED = 1,
+}
+// Retrieve enum metadata with: proto3.getEnumType(PrebuildTriggerStrategy)
+proto3.util.setEnumType(PrebuildTriggerStrategy, "gitpod.v1.PrebuildTriggerStrategy", [
+  { no: 0, name: "PREBUILD_TRIGGER_STRATEGY_UNSPECIFIED" },
+  { no: 1, name: "PREBUILD_TRIGGER_STRATEGY_ACTIVITY_BASED" },
+]);
 
 /**
  * @generated from enum gitpod.v1.BranchMatchingStrategy
@@ -148,6 +172,16 @@ export class PrebuildSettings extends Message<PrebuildSettings> {
    */
   workspaceClass = "";
 
+  /**
+   * @generated from field: gitpod.v1.PrebuildTriggerStrategy trigger_strategy = 6;
+   */
+  triggerStrategy = PrebuildTriggerStrategy.UNSPECIFIED;
+
+  /**
+   * @generated from field: gitpod.v1.PrebuildCloneSettings clone_settings = 7;
+   */
+  cloneSettings?: PrebuildCloneSettings;
+
   constructor(data?: PartialMessage<PrebuildSettings>) {
     super();
     proto3.util.initPartial(data, this);
@@ -161,6 +195,8 @@ export class PrebuildSettings extends Message<PrebuildSettings> {
     { no: 3, name: "branch_strategy", kind: "enum", T: proto3.getEnumType(BranchMatchingStrategy) },
     { no: 4, name: "prebuild_interval", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
     { no: 5, name: "workspace_class", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "trigger_strategy", kind: "enum", T: proto3.getEnumType(PrebuildTriggerStrategy) },
+    { no: 7, name: "clone_settings", kind: "message", T: PrebuildCloneSettings },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PrebuildSettings {
@@ -177,6 +213,45 @@ export class PrebuildSettings extends Message<PrebuildSettings> {
 
   static equals(a: PrebuildSettings | PlainMessage<PrebuildSettings> | undefined, b: PrebuildSettings | PlainMessage<PrebuildSettings> | undefined): boolean {
     return proto3.util.equals(PrebuildSettings, a, b);
+  }
+}
+
+/**
+ * @generated from message gitpod.v1.PrebuildCloneSettings
+ */
+export class PrebuildCloneSettings extends Message<PrebuildCloneSettings> {
+  /**
+   * full_clone determines if the entire repository should be cloned, instead of with `--depth=1`
+   *
+   * @generated from field: bool full_clone = 1;
+   */
+  fullClone = false;
+
+  constructor(data?: PartialMessage<PrebuildCloneSettings>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "gitpod.v1.PrebuildCloneSettings";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "full_clone", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PrebuildCloneSettings {
+    return new PrebuildCloneSettings().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PrebuildCloneSettings {
+    return new PrebuildCloneSettings().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PrebuildCloneSettings {
+    return new PrebuildCloneSettings().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PrebuildCloneSettings | PlainMessage<PrebuildCloneSettings> | undefined, b: PrebuildCloneSettings | PlainMessage<PrebuildCloneSettings> | undefined): boolean {
+    return proto3.util.equals(PrebuildCloneSettings, a, b);
   }
 }
 
@@ -199,6 +274,13 @@ export class WorkspaceSettings extends Message<WorkspaceSettings> {
    */
   restrictedEditorNames: string[] = [];
 
+  /**
+   * Enable automatic authentication for docker daemon with all credentials specified in GITPOD_IMAGE_AUTH
+   *
+   * @generated from field: bool enable_dockerd_authentication = 4;
+   */
+  enableDockerdAuthentication = false;
+
   constructor(data?: PartialMessage<WorkspaceSettings>) {
     super();
     proto3.util.initPartial(data, this);
@@ -210,6 +292,7 @@ export class WorkspaceSettings extends Message<WorkspaceSettings> {
     { no: 1, name: "workspace_class", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "restricted_workspace_classes", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 3, name: "restricted_editor_names", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 4, name: "enable_dockerd_authentication", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): WorkspaceSettings {
@@ -581,6 +664,16 @@ export class UpdateConfigurationRequest_PrebuildSettings extends Message<UpdateC
    */
   workspaceClass?: string;
 
+  /**
+   * @generated from field: optional gitpod.v1.PrebuildTriggerStrategy trigger_strategy = 6;
+   */
+  triggerStrategy?: PrebuildTriggerStrategy;
+
+  /**
+   * @generated from field: optional gitpod.v1.PrebuildCloneSettings clone_settings = 7;
+   */
+  cloneSettings?: PrebuildCloneSettings;
+
   constructor(data?: PartialMessage<UpdateConfigurationRequest_PrebuildSettings>) {
     super();
     proto3.util.initPartial(data, this);
@@ -594,6 +687,8 @@ export class UpdateConfigurationRequest_PrebuildSettings extends Message<UpdateC
     { no: 3, name: "branch_strategy", kind: "enum", T: proto3.getEnumType(BranchMatchingStrategy), opt: true },
     { no: 4, name: "prebuild_interval", kind: "scalar", T: 5 /* ScalarType.INT32 */, opt: true },
     { no: 5, name: "workspace_class", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 6, name: "trigger_strategy", kind: "enum", T: proto3.getEnumType(PrebuildTriggerStrategy), opt: true },
+    { no: 7, name: "clone_settings", kind: "message", T: PrebuildCloneSettings, opt: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): UpdateConfigurationRequest_PrebuildSettings {
@@ -654,6 +749,13 @@ export class UpdateConfigurationRequest_WorkspaceSettings extends Message<Update
    */
   updateRestrictedEditorNames?: boolean;
 
+  /**
+   * Enable automatic authentication for docker daemon with all credentials specified in GITPOD_IMAGE_AUTH
+   *
+   * @generated from field: optional bool enable_dockerd_authentication = 6;
+   */
+  enableDockerdAuthentication?: boolean;
+
   constructor(data?: PartialMessage<UpdateConfigurationRequest_WorkspaceSettings>) {
     super();
     proto3.util.initPartial(data, this);
@@ -667,6 +769,7 @@ export class UpdateConfigurationRequest_WorkspaceSettings extends Message<Update
     { no: 3, name: "update_restricted_workspace_classes", kind: "scalar", T: 8 /* ScalarType.BOOL */, opt: true },
     { no: 4, name: "restricted_editor_names", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 5, name: "update_restricted_editor_names", kind: "scalar", T: 8 /* ScalarType.BOOL */, opt: true },
+    { no: 6, name: "enable_dockerd_authentication", kind: "scalar", T: 8 /* ScalarType.BOOL */, opt: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): UpdateConfigurationRequest_WorkspaceSettings {

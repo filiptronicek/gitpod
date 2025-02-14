@@ -27,6 +27,10 @@ type Props = {
     hasMoreThanOnePage: boolean;
     isSearching: boolean;
     isFetchingNextPage: boolean;
+    /**
+     * If true, the configuration dropdown and the "Run Prebuild" button will be hidden.
+     */
+    hideOrgSpecificControls: boolean;
     onFilterChange: (val: Filter) => void;
     onLoadNextPage: () => void;
     onSort: (columnName: SortField, direction: TableSortOrder) => void;
@@ -40,6 +44,7 @@ export const PrebuildsTable: FC<Props> = ({
     isFetchingNextPage,
     filter,
     sort,
+    hideOrgSpecificControls,
     onFilterChange,
     onLoadNextPage,
     onSort,
@@ -50,12 +55,14 @@ export const PrebuildsTable: FC<Props> = ({
             {/* Search/Filter bar */}
             <div className="flex flex-col-reverse md:flex-row flex-wrap justify-between items-center gap-2">
                 <div className="flex flex-row flex-wrap gap-2 items-center w-full md:w-auto">
-                    <ConfigurationDropdown
-                        selectedConfigurationId={filter?.configurationId}
-                        onChange={(configurationId) => {
-                            onFilterChange({ ...filter, configurationId });
-                        }}
-                    />
+                    {!hideOrgSpecificControls && (
+                        <ConfigurationDropdown
+                            selectedConfigurationId={filter?.configurationId}
+                            onChange={(configurationId) => {
+                                onFilterChange({ ...filter, configurationId });
+                            }}
+                        />
+                    )}
                     <Select
                         value={filter?.status ?? "any"}
                         onValueChange={(status) => {
@@ -77,9 +84,11 @@ export const PrebuildsTable: FC<Props> = ({
                         </SelectContent>
                     </Select>
                 </div>
-                <Button className="w-full md:w-auto" onClick={onTriggerPrebuild}>
-                    Run prebuild
-                </Button>
+                {!hideOrgSpecificControls && (
+                    <Button className="w-full md:w-auto" onClick={onTriggerPrebuild}>
+                        Run prebuild
+                    </Button>
+                )}
             </div>
             <div className="relative w-full overflow-auto mt-4">
                 {prebuilds.length > 0 ? (
@@ -117,22 +126,23 @@ export const PrebuildsTable: FC<Props> = ({
                 ) : (
                     <div
                         className={cn(
-                            "w-full flex justify-center rounded-xl bg-gray-100 dark:bg-gray-800 px-4 py-10 animate-fade-in-fast",
+                            "w-full flex justify-center rounded-xl bg-pk-surface-secondary px-4 py-10 animate-fade-in-fast",
                         )}
                     >
                         <Subheading className="max-w-md">No results found. Try adjusting your search terms.</Subheading>
                     </div>
                 )}
-
-                <div className="mt-4 mb-8 flex flex-row justify-center">
-                    {hasNextPage ? (
-                        <LoadingButton variant="secondary" onClick={onLoadNextPage} loading={isFetchingNextPage}>
-                            Load more
-                        </LoadingButton>
-                    ) : (
-                        hasMoreThanOnePage && <TextMuted>All prebuilds are loaded</TextMuted>
-                    )}
-                </div>
+                {prebuilds.length > 1 && (
+                    <div className="mt-4 mb-8 flex flex-row justify-center">
+                        {hasNextPage ? (
+                            <LoadingButton variant="secondary" onClick={onLoadNextPage} loading={isFetchingNextPage}>
+                                Load more
+                            </LoadingButton>
+                        ) : (
+                            hasMoreThanOnePage && <TextMuted>All prebuilds are loaded</TextMuted>
+                        )}
+                    </div>
+                )}
             </div>
         </>
     );

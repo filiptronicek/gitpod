@@ -450,7 +450,7 @@ func TestRoutes(t *testing.T) {
 			},
 		},
 		{
-			Desc:   "CORS preflight",
+			Desc:   "no CORS allow in workspace urls",
 			Config: &config,
 			Request: modifyRequest(httptest.NewRequest("GET", workspaces[0].URL+"somewhere/in/the/ide", nil),
 				addHostHeader,
@@ -462,12 +462,9 @@ func TestRoutes(t *testing.T) {
 			Expectation: Expectation{
 				Status: http.StatusOK,
 				Header: http.Header{
-					"Access-Control-Allow-Credentials": {"true"},
-					"Access-Control-Allow-Origin":      {"test-domain.com"},
-					"Access-Control-Expose-Headers":    {"Authorization"},
-					"Content-Length":                   {"37"},
-					"Content-Type":                     {"text/plain; charset=utf-8"},
-					"Vary":                             {"Accept-Encoding"},
+					"Content-Length": {"37"},
+					"Content-Type":   {"text/plain; charset=utf-8"},
+					"Vary":           {"Accept-Encoding"},
 				},
 				Body: "workspace hit: /somewhere/in/the/ide\n",
 			},
@@ -864,6 +861,12 @@ func (p *fakeWsInfoProvider) WorkspaceInfo(workspaceID string) *common.Workspace
 	return nil
 }
 
+func (p *fakeWsInfoProvider) AcquireContext(ctx context.Context, workspaceID string, port string) (context.Context, string, error) {
+	return ctx, "", nil
+}
+func (p *fakeWsInfoProvider) ReleaseContext(id string) {
+}
+
 // WorkspaceCoords returns the workspace coords for a public port.
 func (p *fakeWsInfoProvider) WorkspaceCoords(wsProxyPort string) *common.WorkspaceCoords {
 	for _, info := range p.infos {
@@ -983,7 +986,7 @@ func TestRemoveSensitiveCookies(t *testing.T) {
 	var (
 		domain                  = "test-domain.com"
 		sessionCookie           = &http.Cookie{Domain: domain, Name: "_test_domain_com_", Value: "fobar"}
-		sessionCookieJwt2       = &http.Cookie{Domain: domain, Name: "_test_domain_com_jwt2_", Value: "fobar"}
+		sessionCookieJwt2       = &http.Cookie{Domain: domain, Name: "__Host-_test_domain_com_jwt2_", Value: "fobar"}
 		realGitpodSessionCookie = &http.Cookie{Domain: domain, Name: server_lib.CookieNameFromDomain(domain), Value: "fobar"}
 		portAuthCookie          = &http.Cookie{Domain: domain, Name: "_test_domain_com_ws_77f6b236_3456_4b88_8284_81ca543a9d65_port_auth_", Value: "some-token"}
 		ownerCookie             = &http.Cookie{Domain: domain, Name: "_test_domain_com_ws_77f6b236_3456_4b88_8284_81ca543a9d65_owner_", Value: "some-other-token"}

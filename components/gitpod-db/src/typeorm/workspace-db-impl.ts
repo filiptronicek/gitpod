@@ -8,6 +8,7 @@ import {
     AdminGetWorkspacesQuery,
     CommitContext,
     PrebuildInfo,
+    PrebuildWithStatus,
     PrebuiltWorkspace,
     PrebuiltWorkspaceState,
     PrebuiltWorkspaceUpdatable,
@@ -37,6 +38,8 @@ import {
     PrebuiltUpdatableAndWorkspace,
     WorkspaceAndOwner,
     WorkspaceDB,
+    WorkspaceOwnerAndContentDeletedTime,
+    WorkspaceOwnerAndDeletionEligibility,
     WorkspaceOwnerAndSoftDeleted,
     WorkspacePortsAuthData,
 } from "../workspace-db";
@@ -466,8 +469,8 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
             .andWhere("wsi.creationTime >= :periodStart", { periodStart: periodStart.toISOString() })
             .andWhere("wsi.creationTime <= :periodEnd", { periodEnd: periodEnd.toISOString() })
             .orderBy("wsi.creationTime", "DESC")
-            .offset(offset)
-            .limit(limit)
+            .skip(offset)
+            .take(limit)
             .getMany();
 
         const resultSessions: { instance: WorkspaceInstance; workspace: Workspace }[] = [];
@@ -481,27 +484,31 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
         return resultSessions;
     }
 
-    public async findWorkspacesForGarbageCollection(minAgeInDays: number, limit: number): Promise<WorkspaceAndOwner[]> {
+    public async findEligibleWorkspacesForSoftDeletion(
+        cutOffDate: Date = new Date(),
+        limit: number = 100,
+        type: WorkspaceType = "regular",
+    ): Promise<WorkspaceOwnerAndDeletionEligibility[]> {
+        if (cutOffDate > new Date()) {
+            throw new Error("cutOffDate must not be in the future, was: " + cutOffDate.toISOString());
+        }
         const workspaceRepo = await this.getWorkspaceRepo();
-
-        // AND ws.softDeletedTime = ''    // enables usage of: ind_softDeletion
         const dbResults = await workspaceRepo.query(
             `
                 SELECT ws.id AS id,
-                       ws.ownerId AS ownerId
+                       ws.ownerId AS ownerId,
+                       ws.deletionEligibilityTime AS deletionEligibilityTime
                     FROM d_b_workspace AS ws
-                    LEFT OUTER JOIN d_b_workspace_instance AS wsi ON ws.id=wsi.workspaceid
-                    WHERE	ws.deleted = 0
-                        AND ws.type='regular'
-                        AND ws.softDeletedTime = ''
+                    WHERE ws.deleted = 0
+                        AND ws.type = ?
                         AND ws.softDeleted IS NULL
+                        AND ws.softDeletedTime = ''
                         AND ws.pinned = 0
-                        AND ws.creationTime < NOW() - INTERVAL ? DAY
-                    GROUP BY ws.id, ws.ownerId
-                    HAVING MAX(GREATEST(wsi.creationTime, wsi.startedTime, wsi.stoppedTime)) < NOW() - INTERVAL ? DAY OR MAX(wsi.creationTime) IS NULL
+                        AND ws.deletionEligibilityTime != ''
+                        AND ws.deletionEligibilityTime < ?
                     LIMIT ?;
             `,
-            [minAgeInDays, minAgeInDays, limit],
+            [type, cutOffDate.toISOString(), limit],
         );
 
         return dbResults as WorkspaceAndOwner[];
@@ -511,12 +518,12 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
         minContentDeletionTimeInDays: number,
         limit: number,
         now: Date,
-    ): Promise<WorkspaceAndOwner[]> {
+    ): Promise<WorkspaceOwnerAndContentDeletedTime[]> {
         const minPurgeTime = daysBefore(now.toISOString(), minContentDeletionTimeInDays);
         const repo = await this.getWorkspaceRepo();
         const qb = repo
             .createQueryBuilder("ws")
-            .select(["ws.id", "ws.ownerId"])
+            .select(["ws.id", "ws.ownerId", "ws.contentDeletedTime"])
             .where(`ws.contentDeletedTime != ''`)
             .andWhere(`ws.contentDeletedTime < :minPurgeTime`, { minPurgeTime })
             .andWhere(`ws.deleted = 0`)
@@ -549,31 +556,6 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
         );
 
         return dbResults as WorkspaceOwnerAndSoftDeleted[];
-    }
-
-    public async findPrebuiltWorkspacesForGC(daysUnused: number, limit: number): Promise<WorkspaceAndOwner[]> {
-        const workspaceRepo = await this.getWorkspaceRepo();
-        const dbResults = await workspaceRepo.query(
-            `
-                SELECT ws.id AS id,
-                    ws.ownerId AS ownerId
-                FROM d_b_workspace AS ws,
-                    d_b_prebuilt_workspace AS pb
-                LEFT OUTER JOIN d_b_workspace AS usages ON usages.basedOnPrebuildId = pb.id
-                WHERE
-                        pb.buildworkspaceId = ws.id
-                    AND ws.type = 'prebuild'
-                    AND ws.contentDeletedTime = ''
-                    AND ws.pinned = 0
-                    AND ws.creationTime < NOW() - INTERVAL ? DAY
-                GROUP BY ws.id, ws.ownerId
-                HAVING
-                    max(usages.creationTime) IS NULL or max(usages.creationTime) < NOW() - INTERVAL ? DAY
-                LIMIT ?;
-            `,
-            [daysUnused, daysUnused, limit],
-        );
-        return dbResults as WorkspaceAndOwner[];
     }
 
     private async doJoinInstanceWithWorkspace<T>(
@@ -713,11 +695,22 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
 
     public async findPrebuildByWorkspaceID(wsid: string): Promise<PrebuiltWorkspace | undefined> {
         const repo = await this.getPrebuiltWorkspaceRepo();
-        return await repo.createQueryBuilder("pws").where("pws.buildWorkspaceId = :wsid", { wsid }).getOne();
+        return await repo
+            .createQueryBuilder("pws")
+            .innerJoin(DBWorkspace, "ws", "pws.buildWorkspaceId = ws.id")
+            .where("pws.buildWorkspaceId = :wsid", { wsid })
+            .andWhere("ws.contentDeletedTime = ''")
+            .getOne();
     }
+
     public async findPrebuildByID(pwsid: string): Promise<PrebuiltWorkspace | undefined> {
         const repo = await this.getPrebuiltWorkspaceRepo();
-        return await repo.findOne(pwsid);
+        return await repo
+            .createQueryBuilder("pws")
+            .innerJoin(DBWorkspace, "ws", "pws.buildWorkspaceId = ws.id")
+            .where("pws.id = :pwsid", { pwsid })
+            .andWhere("ws.contentDeletedTime = ''")
+            .getOne();
     }
 
     public async findPrebuildsWithWorkspace(projectId: string): Promise<PrebuildWithWorkspace[]> {
@@ -738,6 +731,26 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
                 workspace: withWorkspace.workspace,
             };
         });
+    }
+
+    public async findPrebuildWithStatus(prebuildId: string): Promise<PrebuildWithStatus | undefined> {
+        const pbws = await this.findPrebuiltWorkspaceById(prebuildId);
+        if (!pbws) {
+            return undefined;
+        }
+        const [info, workspace, instance] = await Promise.all([
+            this.findPrebuildInfos([prebuildId]).then((infos) => (infos.length > 0 ? infos[0] : undefined)),
+            this.findById(pbws.buildWorkspaceId),
+            this.findCurrentInstance(pbws.buildWorkspaceId),
+        ]);
+        if (!info || !workspace) {
+            return undefined;
+        }
+        const result: PrebuildWithStatus = { info, status: pbws.state, workspace, instance };
+        if (pbws.error) {
+            result.error = pbws.error;
+        }
+        return result;
     }
 
     public async countUnabortedPrebuildsSince(projectId: string, date: Date): Promise<number> {
@@ -994,30 +1007,6 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
         return qb.getMany();
     }
 
-    async findPrebuiltWorkspacesByProject(
-        projectId: string,
-        branch?: string,
-        limit?: number,
-    ): Promise<PrebuiltWorkspaceWithWorkspace[]> {
-        const repo = await this.getPrebuiltWorkspaceRepo();
-
-        const query = repo
-            .createQueryBuilder("pws")
-            .orderBy("pws.creationTime", "DESC")
-            .innerJoinAndMapOne("pws.workspace", DBWorkspace, "ws", "pws.buildWorkspaceId = ws.id")
-            .andWhere("pws.projectId = :projectId", { projectId });
-
-        if (branch) {
-            query.andWhere("pws.branch = :branch", { branch });
-        }
-        if (limit) {
-            query.limit(limit);
-        }
-
-        const res = await query.getMany();
-        return res as PrebuiltWorkspaceWithWorkspace[];
-    }
-
     /**
      * Finds prebuilt workspaces by organization with optional filtering and pagination.
      * @param organizationId The ID of the organization.
@@ -1058,6 +1047,7 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
             .innerJoinAndMapOne("pws.project", DBProject, "project", "pws.projectId = project.id")
             .where("project.markedDeleted = false")
             .andWhere("project.id IS NOT NULL")
+            .andWhere("ws.contentDeletedTime = ''")
             .skip(pagination.offset)
             .take(pagination.limit)
             .orderBy("pws.creationTime", sort.order); // todo: take sort field into account
@@ -1125,7 +1115,8 @@ export class TypeORMWorkspaceDBImpl extends TransactionalDBImpl<WorkspaceDB> imp
             .createQueryBuilder("pws")
             .orderBy("pws.creationTime", "DESC")
             .innerJoinAndMapOne("pws.workspace", DBWorkspace, "ws", "pws.buildWorkspaceId = ws.id")
-            .andWhere("pws.id = :id", { id });
+            .andWhere("pws.id = :id", { id })
+            .andWhere("ws.contentDeletedTime = ''");
 
         return query.getOne();
     }

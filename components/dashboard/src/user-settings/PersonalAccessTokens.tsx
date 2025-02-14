@@ -6,7 +6,7 @@
 
 import { PersonalAccessToken } from "@gitpod/public-api/lib/gitpod/experimental/v1/tokens_pb";
 import { useCallback, useEffect, useState } from "react";
-import { Redirect, useLocation } from "react-router";
+import { useLocation } from "react-router";
 import { personalAccessTokensService } from "../service/public-api";
 import { PageWithSettingsSubMenu } from "./PageWithSettingsSubMenu";
 import { settingsPathPersonalAccessTokenCreate, settingsPathPersonalAccessTokenEdit } from "./settings.routes";
@@ -21,17 +21,10 @@ import TokenEntry from "./TokenEntry";
 import ShowTokenModal from "./ShowTokenModal";
 import Pagination from "../Pagination/Pagination";
 import { Heading2, Subheading } from "../components/typography/headings";
-import { useFeatureFlag } from "../data/featureflag-query";
 import { Button } from "@podkit/buttons/Button";
 import { LinkButton } from "@podkit/buttons/LinkButton";
 
 export default function PersonalAccessTokens() {
-    const enablePersonalAccessTokens = useFeatureFlag("personalAccessTokensEnabled");
-
-    if (!enablePersonalAccessTokens) {
-        return <Redirect to="/" />;
-    }
-
     return (
         <div>
             <PageWithSettingsSubMenu>
@@ -169,14 +162,7 @@ function ListAccessTokensView() {
         <>
             <div className="flex items-center sm:justify-between mb-4">
                 <div>
-                    <Heading2 className="flex gap-4 items-center">
-                        Access Tokens
-                        <PillLabel type="warn">
-                            <a href="https://www.gitpod.io/docs/references/gitpod-releases">
-                                <span className="text-xs">BETA</span>
-                            </a>
-                        </PillLabel>
-                    </Heading2>
+                    <Heading2 className="flex gap-4 items-center">Access Tokens</Heading2>
                     <Subheading>
                         Create or regenerate access tokens.{" "}
                         <a
@@ -186,15 +172,6 @@ function ListAccessTokensView() {
                             rel="noreferrer"
                         >
                             Learn more
-                        </a>
-                        &nbsp;&middot;&nbsp;
-                        <a
-                            className="gp-link"
-                            href="https://github.com/gitpod-io/gitpod/issues/15433"
-                            target="_blank"
-                            rel="noreferrer"
-                        >
-                            Send feedback
                         </a>
                     </Subheading>
                 </div>
@@ -208,7 +185,7 @@ function ListAccessTokensView() {
                 </Alert>
             )}
             {tokenInfo && (
-                <div className="p-4 mb-4 divide-y rounded-xl bg-gray-50 dark:bg-gray-800">
+                <div className="p-4 mb-4 divide-y rounded-xl bg-pk-surface-secondary">
                     <div className="pb-2">
                         <div className="flex gap-2 content-center font-semibold text-gray-700 dark:text-gray-200">
                             <span>{tokenInfo.data.name}</span>
@@ -248,8 +225,8 @@ function ListAccessTokensView() {
             ) : (
                 <>
                     {tokens.length === 0 ? (
-                        <div className="bg-gray-100 dark:bg-gray-800 rounded-xl w-full py-28 flex flex-col items-center">
-                            <Heading2 color="light" className="text-center pb-3">
+                        <div className="bg-pk-surface-secondary rounded-xl w-full py-28 flex flex-col items-center">
+                            <Heading2 className="text-center pb-3 text-pk-content-invert-secondary">
                                 No Access Tokens
                             </Heading2>
                             <Subheading className="text-center pb-6 w-96">
@@ -259,7 +236,7 @@ function ListAccessTokensView() {
                         </div>
                     ) : (
                         <>
-                            <div className="px-3 py-3 flex justify-between space-x-2 text-sm text-gray-400 mb-2 bg-gray-100 dark:bg-gray-800 rounded-xl">
+                            <div className="px-3 py-3 flex justify-between space-x-2 text-sm text-gray-400 mb-2 bg-pk-surface-secondary rounded-xl">
                                 <Subheading className="w-4/12">Token Name</Subheading>
                                 <Subheading className="w-4/12">Permissions</Subheading>
                                 <Subheading className="w-3/12">Expires</Subheading>

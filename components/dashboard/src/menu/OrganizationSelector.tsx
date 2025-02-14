@@ -11,26 +11,28 @@ import { useCurrentUser } from "../user-context";
 import { useCurrentOrg, useOrganizations } from "../data/organizations/orgs-query";
 import { useLocation } from "react-router";
 import { useOrgBillingMode } from "../data/billing-mode/org-billing-mode-query";
-import { useFeatureFlag, useHasConfigurationsAndPrebuildsEnabled } from "../data/featureflag-query";
 import { useIsOwner, useListOrganizationMembers, useHasRolePermission } from "../data/organizations/members-query";
-import { isOrganizationOwned } from "@gitpod/public-api-common/lib/user-utils";
+import { isAllowedToCreateOrganization } from "@gitpod/public-api-common/lib/user-utils";
 import { OrganizationRole } from "@gitpod/public-api/lib/gitpod/v1/organization_pb";
+import { useFeatureFlag } from "../data/featureflag-query";
+import { PlusIcon } from "lucide-react";
+import { useInstallationConfiguration } from "../data/installation/installation-config-query";
 
 export default function OrganizationSelector() {
     const user = useCurrentUser();
     const orgs = useOrganizations();
     const currentOrg = useCurrentOrg();
     const members = useListOrganizationMembers().data ?? [];
-    const owner = useIsOwner();
+    const isOwner = useIsOwner();
     const hasMemberPermission = useHasRolePermission(OrganizationRole.MEMBER);
     const { data: billingMode } = useOrgBillingMode();
     const getOrgURL = useGetOrgURL();
-    const configurationsAndPrebuilds = useHasConfigurationsAndPrebuildsEnabled();
-    const showPrebuildMenuItem = useFeatureFlag("showPrebuildsMenuItem");
-    const isDedicated = useFeatureFlag("enableDedicatedOnboardingFlow");
+    const { data: installationConfig } = useInstallationConfiguration();
+    const isDedicated = !!installationConfig?.isDedicatedInstallation;
+    const isMultiOrgEnabled = useFeatureFlag("enable_multi_org");
 
     // we should have an API to ask for permissions, until then we duplicate the logic here
-    const canCreateOrgs = user && !isOrganizationOwned(user) && !isDedicated;
+    const canCreateOrgs = user && isAllowedToCreateOrganization(user, isDedicated, isMultiOrgEnabled);
 
     const userFullName = user?.name || "...";
 
@@ -61,15 +63,13 @@ export default function OrganizationSelector() {
     if (currentOrg.data) {
         // collaborator can't access projects, members, usage and billing
         if (hasMemberPermission) {
-            if (configurationsAndPrebuilds && showPrebuildMenuItem) {
-                linkEntries.push({
-                    title: "Prebuilds",
-                    customContent: <LinkEntry>Prebuilds</LinkEntry>,
-                    active: false,
-                    separator: false,
-                    link: "/prebuilds",
-                });
-            }
+            linkEntries.push({
+                title: "Prebuilds",
+                customContent: <LinkEntry>Prebuilds</LinkEntry>,
+                active: false,
+                separator: false,
+                link: "/prebuilds",
+            });
             linkEntries.push({
                 title: "Members",
                 customContent: <LinkEntry>Members</LinkEntry>,
@@ -77,15 +77,27 @@ export default function OrganizationSelector() {
                 separator: true,
                 link: "/members",
             });
-            linkEntries.push({
-                title: "Usage",
-                customContent: <LinkEntry>Usage</LinkEntry>,
-                active: false,
-                separator: false,
-                link: "/usage",
-            });
+            if (isDedicated) {
+                if (isOwner) {
+                    linkEntries.push({
+                        title: "Insights",
+                        customContent: <LinkEntry>Insights</LinkEntry>,
+                        active: false,
+                        separator: false,
+                        link: "/insights",
+                    });
+                }
+            } else {
+                linkEntries.push({
+                    title: "Usage",
+                    customContent: <LinkEntry>Usage</LinkEntry>,
+                    active: false,
+                    separator: false,
+                    link: "/usage",
+                });
+            }
             // Show billing if user is an owner of current org
-            if (owner) {
+            if (isOwner) {
                 if (billingMode?.mode === "usage-based") {
                     linkEntries.push({
                         title: "Billing",
@@ -97,15 +109,13 @@ export default function OrganizationSelector() {
                 }
             }
 
-            if (configurationsAndPrebuilds) {
-                linkEntries.push({
-                    title: "Repository Settings",
-                    customContent: <LinkEntry>Repository Settings</LinkEntry>,
-                    active: false,
-                    separator: false,
-                    link: "/repositories",
-                });
-            }
+            linkEntries.push({
+                title: "Repository Settings",
+                customContent: <LinkEntry>Repository Settings</LinkEntry>,
+                active: false,
+                separator: false,
+                link: "/repositories",
+            });
 
             // Org settings is available for all members, but only owner can change them
             // collaborator can read org setting via API so that other feature like restrict org workspace classes could work
@@ -146,16 +156,9 @@ export default function OrganizationSelector() {
                   {
                       title: "Create a new organization",
                       customContent: (
-                          <div className="w-full text-gray-500 flex items-center">
+                          <div className="w-full text-pk-content-secondary flex items-center">
                               <span className="flex-1">New Organization</span>
-                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 14 14" className="w-3.5">
-                                  <path
-                                      fill="currentColor"
-                                      fillRule="evenodd"
-                                      d="M7 0a1 1 0 011 1v5h5a1 1 0 110 2H8v5a1 1 0 11-2 0V8H1a1 1 0 010-2h5V1a1 1 0 011-1z"
-                                      clipRule="evenodd"
-                                  />
-                              </svg>
+                              <PlusIcon size={20} className="size-3.5" />
                           </div>
                       ),
                       link: "/orgs/new",

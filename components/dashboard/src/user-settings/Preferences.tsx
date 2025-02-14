@@ -23,6 +23,8 @@ import {
 import { useOrgBillingMode } from "../data/billing-mode/org-billing-mode-query";
 import { converter, userClient } from "../service/public-api";
 import { LoadingButton } from "@podkit/buttons/LoadingButton";
+import { useOrgSettingsQuery } from "../data/organizations/org-settings-query";
+import Alert from "../components/Alert";
 
 export type IDEChangedTrackLocation = "workspace_list" | "workspace_start" | "preferences";
 
@@ -32,11 +34,12 @@ export default function Preferences() {
     const updateUser = useUpdateCurrentUserMutation();
     const billingMode = useOrgBillingMode();
     const updateDotfileRepo = useUpdateCurrentUserDotfileRepoMutation();
+    const { data: settings } = useOrgSettingsQuery();
 
     const [dotfileRepo, setDotfileRepo] = useState<string>(user?.dotfileRepo || "");
 
     const [workspaceTimeout, setWorkspaceTimeout] = useState<string>(
-        converter.toDurationString(user?.workspaceTimeoutSettings?.inactivity),
+        converter.toDurationStringOpt(user?.workspaceTimeoutSettings?.inactivity) || "",
     );
     const [timeoutUpdating, setTimeoutUpdating] = useState(false);
     const [creationError, setCreationError] = useState<Error>();
@@ -154,7 +157,7 @@ export default function Preferences() {
                             <LoadingButton
                                 type="submit"
                                 loading={updateDotfileRepo.isLoading}
-                                disabled={updateDotfileRepo.isLoading || (dotfileRepo === user?.dotfileRepo ?? "")}
+                                disabled={updateDotfileRepo.isLoading || dotfileRepo === user?.dotfileRepo}
                             >
                                 Save
                             </LoadingButton>
@@ -166,6 +169,14 @@ export default function Preferences() {
                 <Subheading>Workspaces will stop after a period of inactivity without any user input.</Subheading>
 
                 <div className="mt-4 max-w-xl">
+                    {!!settings?.timeoutSettings?.denyUserTimeouts && (
+                        <Alert type="warning" className="mb-4">
+                            The currently selected organization does not allow members to set custom workspace timeouts,
+                            so for workspaces created in it, its default timeout of{" "}
+                            {converter.toDurationStringOpt(settings?.timeoutSettings?.inactivity) || ""} will be used.
+                        </Alert>
+                    )}
+
                     <form onSubmit={saveWorkspaceTimeout}>
                         <InputField
                             label="Default Workspace Timeout"
@@ -190,15 +201,15 @@ export default function Preferences() {
                                         loading={timeoutUpdating}
                                         disabled={
                                             workspaceTimeout ===
-                                                converter.toDurationString(
-                                                    user?.workspaceTimeoutSettings?.inactivity,
-                                                ) ?? ""
+                                            (converter.toDurationStringOpt(
+                                                user?.workspaceTimeoutSettings?.inactivity,
+                                            ) || "")
                                         }
                                     >
                                         Save
                                     </LoadingButton>
                                 </div>
-                                {!!creationError && (
+                                {creationError && (
                                     <p className="text-gitpod-red w-full max-w-lg">
                                         Cannot set custom workspace timeout: {creationError.message}
                                     </p>

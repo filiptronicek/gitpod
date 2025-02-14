@@ -188,7 +188,7 @@ RUN curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-$(arch).zip" -o aws
     ./aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update && \
     rm -rf awscliv2.zip ./aws
 
-ENV GO_VERSION=1.22.2
+ENV GO_VERSION=1.23.3
 ENV GOPATH=/root/go-packages
 ENV GOROOT=/root/go
 ENV PATH=$GOROOT/bin:$GOPATH/bin:$PATH
@@ -196,6 +196,7 @@ ENV PATH=$GOROOT/bin:$GOPATH/bin:$PATH
 RUN mkdir -p $GOROOT && \
     cd /root && \
     curl -fsSL https://dl.google.com/go/go$GO_VERSION.${TARGETOS}-${TARGETARCH}.tar.gz | tar xzs
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
 
 # Install codecov uploader
 # https://about.codecov.io/blog/introducing-codecovs-new-uploader
@@ -294,34 +295,46 @@ RUN mkdir -p ~/.terraform \
 ## Java
 ENV JAVA_VERSION=11.0.23.fx-zulu
 RUN curl -fsSL "https://get.sdkman.io" | bash \
-&& bash -c ". /root/.sdkman/bin/sdkman-init.sh \
-            && sed -i 's/sdkman_selfupdate_enable=true/sdkman_selfupdate_enable=false/g' /root/.sdkman/etc/config \
-            && sed -i 's/sdkman_selfupdate_feature=true/sdkman_selfupdate_feature=false/g' /root/.sdkman/etc/config \
-            && sdk install java ${JAVA_VERSION} \
-            && sdk default java ${JAVA_VERSION} \
-            && sdk install gradle \
-            && sdk install maven \
-            && sdk flush archives \
-            && sdk flush temp \
-            && mkdir /root/.m2 \
-            && printf '<settings>\n  <localRepository>/workspace/m2-repository/</localRepository>\n</settings>\n' > /root/.m2/settings.xml \
-            && echo 'export SDKMAN_DIR=\"/root/.sdkman\"' >> /root/.bashrc.d/99-java \
-            && echo '[[ -s \"/root/.sdkman/bin/sdkman-init.sh\" ]] && source \"/root/.sdkman/bin/sdkman-init.sh\"' >> /root/.bashrc.d/99-java"
+    && bash -c ". /root/.sdkman/bin/sdkman-init.sh \
+    && sed -i 's/sdkman_selfupdate_enable=true/sdkman_selfupdate_enable=false/g' /root/.sdkman/etc/config \
+    && sed -i 's/sdkman_selfupdate_feature=true/sdkman_selfupdate_feature=false/g' /root/.sdkman/etc/config \
+    && sdk install java ${JAVA_VERSION} \
+    && sdk default java ${JAVA_VERSION} \
+    && sdk install gradle \
+    && sdk install maven \
+    && sdk flush archives \
+    && sdk flush temp \
+    && mkdir /root/.m2 \
+    && printf '<settings>\n  <localRepository>/workspace/m2-repository/</localRepository>\n</settings>\n' > /root/.m2/settings.xml \
+    && echo 'export SDKMAN_DIR=\"/root/.sdkman\"' >> /root/.bashrc.d/99-java \
+    && echo '[[ -s \"/root/.sdkman/bin/sdkman-init.sh\" ]] && source \"/root/.sdkman/bin/sdkman-init.sh\"' >> /root/.bashrc.d/99-java"
 # above, we are adding the sdkman init to .bashrc (executing sdkman-init.sh does that), because one is executed on interactive shells, the other for non-interactive shells (e.g. plugin-host)
 ENV GRADLE_USER_HOME=/workspace/.gradle/
 
-ENV NODE_VERSION=18.18.2
+ENV NODE_VERSION=18.20.4
 
 ENV PNPM_HOME=/root/.pnpm
 ENV PATH=/root/.nvm/versions/node/v${NODE_VERSION}/bin:/root/.yarn/bin:${PNPM_HOME}:$PATH
 ENV HOME=/root
 RUN curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash \
     && bash -c ". $HOME/.nvm/nvm.sh \
-        && nvm install v${NODE_VERSION} \
-        && nvm alias default v${NODE_VERSION} \
-        && npm install -g typescript yarn pnpm node-gyp"
+    && nvm install v${NODE_VERSION} \
+    && nvm alias default v${NODE_VERSION} \
+    && npm install -g typescript yarn pnpm node-gyp"
 
 ENV PATH=$PATH:/root/.aws-iam:/root/.terraform:/workspace/bin
+
+### Telepresence ###
+RUN curl -fsSL https://packagecloud.io/datawireio/telepresence/gpgkey | apt-key add - \
+    # 'cosmic' not supported
+    && add-apt-repository -yu "deb https://packagecloud.io/datawireio/telepresence/ubuntu/ bionic main" \
+    # 0.95 (current at the time of this commit) is broken
+    && install-packages \
+    iproute2 \
+    iptables \
+    net-tools \
+    socat \
+    telepresence=0.109
 
 # Install pre-commit hooks under /workspace during prebuilds
 ENV PRE_COMMIT_HOME=/workspace/.pre-commit

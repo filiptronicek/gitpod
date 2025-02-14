@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2024 Gitpod GmbH. All rights reserved.
+ * Copyright (c) 2025 Gitpod GmbH. All rights reserved.
  * Licensed under the GNU Affero General Public License (AGPL).
  * See License.AGPL.txt in the project root for license information.
  */
@@ -770,6 +770,16 @@ export class PrebuildStatus extends Message<PrebuildStatus> {
    */
   taskLogs: TaskLog[] = [];
 
+  /**
+   * @generated from field: string image_build_log_url = 6;
+   */
+  imageBuildLogUrl = "";
+
+  /**
+   * @generated from field: google.protobuf.Timestamp stop_time = 7;
+   */
+  stopTime?: Timestamp;
+
   constructor(data?: PartialMessage<PrebuildStatus>) {
     super();
     proto3.util.initPartial(data, this);
@@ -783,6 +793,8 @@ export class PrebuildStatus extends Message<PrebuildStatus> {
     { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 4, name: "log_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "task_logs", kind: "message", T: TaskLog, repeated: true },
+    { no: 6, name: "image_build_log_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "stop_time", kind: "message", T: Timestamp },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PrebuildStatus {

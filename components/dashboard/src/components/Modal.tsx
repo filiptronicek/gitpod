@@ -29,6 +29,7 @@ type Props = {
     autoFocus?: boolean;
     disableFocusLock?: boolean;
     className?: string;
+    containerClassName?: string;
     disabled?: boolean;
     onClose: () => void;
     onSubmit?: () => void | Promise<void>;
@@ -44,6 +45,7 @@ export const Modal: FC<Props> = ({
     autoFocus = false,
     disableFocusLock = false,
     className,
+    containerClassName,
     disabled = false,
     onClose,
     onSubmit,
@@ -54,8 +56,8 @@ export const Modal: FC<Props> = ({
 
             trackEvent("modal_dismiss", {
                 manner,
-                title: title,
-                specify: specify,
+                title,
+                specify,
                 path: window.location.pathname,
             });
         },
@@ -82,13 +84,20 @@ export const Modal: FC<Props> = ({
                 tabIndex={0}
             >
                 {/* Modal outer-container for positioning */}
-                <div className="pointer-events-none relative h-[calc(100%-1rem)] w-auto min-[576px]:mx-auto min-[576px]:mt-7 min-[576px]:h-[calc(100%-3.5rem)] min-[576px]:max-w-[500px]">
+                <div
+                    className={cn(
+                        "pointer-events-none relative",
+                        "h-dvh w-auto", // small screens
+                        "min-[576px]:mx-auto min-[576px]:mt-7 min-[576px]:h-[calc(100%-3.5rem)] min-[576px]:max-w-[500px]", // large screens
+                        containerClassName,
+                    )}
+                >
                     <FocusOn
                         autoFocus={autoFocus}
                         onClickOutside={handleClickOutside}
                         onEscapeKey={handleEscape}
                         focusLock={!disableFocusLock}
-                        className="relative max-h-[100%] w-full"
+                        className="relative max-h-full h-full w-full"
                     >
                         {/* Visible Modal */}
                         <div
@@ -97,7 +106,7 @@ export const Modal: FC<Props> = ({
                                 "bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 outline-none",
                                 "p-6 text-left",
                                 "filter drop-shadow-xl",
-                                "rounded-none sm:rounded-xl",
+                                "rounded-none min-[576px]:rounded-xl",
                                 className,
                             )}
                             role="dialog"
@@ -143,11 +152,18 @@ const MaybeWithForm: FC<MaybeWithFormProps> = ({ onSubmit, disabled, children })
     );
 
     if (!onSubmit) {
-        return <>{children}</>;
+        return (
+            <div className="flex flex-col max-h-[calc(100dvh-3rem)] min-[576px]:max-h-[calc(100dvh-6rem)]">
+                {children}
+            </div>
+        );
     }
 
     return (
-        <form onSubmit={handleSubmit}>
+        <form
+            onSubmit={handleSubmit}
+            className="flex flex-col max-h-[calc(100dvh-3rem)] min-[576px]:max-h-[calc(100dvh-6rem)]"
+        >
             {/* including a hidden submit button ensures submit on enter works despite a button w/ type="submit" existing or not */}
             <input type="submit" className="hidden" hidden disabled={disabled} />
             {children}
@@ -161,7 +177,7 @@ type ModalHeaderProps = {
 
 export const ModalHeader: FC<ModalHeaderProps> = ({ children }) => {
     return (
-        <Heading2 id="modal-header" className="pb-2">
+        <Heading2 id="modal-header" className="pb-2 shrink-0">
             {children}
         </Heading2>
     );
@@ -169,18 +185,20 @@ export const ModalHeader: FC<ModalHeaderProps> = ({ children }) => {
 
 type ModalBodyProps = {
     children: ReactNode;
+    className?: string;
     hideDivider?: boolean;
 };
 
-export const ModalBody: FC<ModalBodyProps> = ({ children, hideDivider = false }) => {
+export const ModalBody: FC<ModalBodyProps> = ({ children, hideDivider = false, className }) => {
     return (
         // Allows the first tabbable element in the body to receive focus on mount
         <AutoFocusInside
             className={cn(
-                "md:flex-grow relative border-gray-200 dark:border-gray-800 -mx-6 px-6 pb-6 overflow-y-auto",
+                "flex-grow min-[576px]:flex-grow-0 relative border-gray-200 dark:border-gray-800 -mx-6 px-6 pb-6 overflow-y-auto",
                 {
                     "border-t border-b mt-2 py-4": !hideDivider,
                 },
+                className,
             )}
         >
             {children}
@@ -200,7 +218,7 @@ export const ModalFooter: FC<ModalFooterProps> = ({ className, alert, children }
             <div
                 className={classNames(
                     // causes footer to show up on top of alert
-                    "relative",
+                    "relative shrink-0",
                     // make as wide as the modal so it covers the alert
                     "-mx-6 -mb-6 p-6",
                     // apply the same bg and rounded corners as the modal

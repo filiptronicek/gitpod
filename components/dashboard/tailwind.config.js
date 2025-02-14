@@ -66,11 +66,17 @@ module.exports = {
                     tertiary: "rgb(var(--surface-tertiary) / <alpha-value>)",
                     labels: "rgb(var(--surface-labels) / <alpha-value>)",
                     invert: "rgb(var(--surface-invert) / <alpha-value>)",
+                    "01": "rgb(var(--surface-01) / <alpha-value>)",
                 },
                 "pk-border": {
+                    light: "rgb(var(--border-light) / <alpha-value>)",
                     base: "rgb(var(--border-base) / <alpha-value>)",
-                    light: "rgb(var(--border-light) / <alpha-value>)"
+                    strong: "rgb(var(--border-strong) / <alpha-value>)",
+                    invert: "rgb(var(--border-invert) / <alpha-value>)",
                 },
+            },
+            boxShadow: {
+                engraving: "inset 0px 1px 1px rgba(0, 0, 0, 0.1)",
             },
             backgroundImage: {
                 "kumquat-gradient": "linear-gradient(137.41deg, #FFAD33 14.37%, #FF8A00 91.32%)",
@@ -100,12 +106,22 @@ module.exports = {
                     "0%": { opacity: "0" },
                     "100%": { opacity: "1" },
                 },
+                "accordion-down": {
+                    from: { height: "0" },
+                    to: { height: "var(--radix-accordion-content-height)" },
+                  },
+                "accordion-up": {
+                    from: { height: "var(--radix-accordion-content-height)" },
+                    to: { height: "0" },
+                },
             },
             animation: {
                 "toast-in-right": "toast-in-right 0.3s ease-in-out",
                 "fade-in": "fade-in 3s linear",
                 "fade-in-fast": "fade-in .3s ease-in-out",
                 "spin-slow": "spin 2s linear infinite",
+                "accordion-down": "accordion-down 0.2s ease-out",
+                "accordion-up": "accordion-up 0.2s ease-out",
             },
             transitionProperty: {
                 width: "width",

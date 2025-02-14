@@ -27,7 +27,7 @@ export class TokenService implements TokenProvider {
      *
      * The default lifetime of a token if not specified otherwise.
      * Atm we only specify a different lifetime on workspace starts (for the token we pass to "git clone" during content init).
-     * Also, this value is relevant for "opportunistic token refreshes" (enabled for BitBucket only atm): It's the time we mark a token as "reserved" (= do not opportunistically refresh it).
+     * Also, this value is relevant for "opportunistic token refreshes" (enabled for Bitbucket only atm): It's the time we mark a token as "reserved" (= do not opportunistically refresh it).
      */
     static readonly DEFAULT_LIFETIME = 5;
 
@@ -95,7 +95,7 @@ export class TokenService implements TokenProvider {
                         const doOpportunisticRefresh =
                             !!authProvider.requiresOpportunisticRefresh && authProvider.requiresOpportunisticRefresh();
                         if (!doOpportunisticRefresh) {
-                            // No opportunistic refresh? Update reserveation and we are done.
+                            // No opportunistic refresh? Update reservation and we are done.
                             await updateReservation(tokenEntry.uid, token, requestedLifetimeDate);
                             reportScmTokenRefreshRequest(host, opportunisticRefresh, "still_valid");
                             return token;

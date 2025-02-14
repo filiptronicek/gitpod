@@ -15,7 +15,6 @@ import {
     DisposableCollection,
     HeadlessUpdatesChannel,
     PrebuildUpdatesChannel,
-    PrebuildWithStatus,
     RedisHeadlessUpdate,
     RedisPrebuildUpdate,
     RedisWorkspaceInstanceUpdate,
@@ -68,7 +67,7 @@ export class RedisSubscriber {
                 let err: Error | undefined;
                 try {
                     await this.onMessage(channel, message);
-                    log.debug("[redis] Succesfully handled update", { channel, message });
+                    log.debug("[redis] Successfully handled update", { channel, message });
                 } catch (e) {
                     err = e;
                     log.error("[redis] Failed to handle message from Pub/Sub", e, { channel, message });
@@ -133,28 +132,20 @@ export class RedisSubscriber {
             return;
         }
 
-        const listeners = this.prebuildUpdateListeners.get(update.projectID) || [];
+        const listeners = this.prebuildUpdateListeners.get(update.projectID) ?? [];
+        if (update.organizationID) {
+            listeners.push(...(this.prebuildUpdateListeners.get(update.organizationID) ?? []));
+        }
         if (listeners.length === 0) {
             return;
         }
 
         const ctx = {};
-        const info = (await this.workspaceDB.findPrebuildInfos([update.prebuildID]))[0];
-        if (!info) {
-            log.error("Failed to find prebuild info for prebuild", { ...update });
+        const prebuildWithStatus = await this.workspaceDB.findPrebuildWithStatus(update.prebuildID);
+        if (!prebuildWithStatus) {
+            log.error("Failed to find (all pieces of) prebuilt workspace", { ...update });
             return;
         }
-        const workspace = await this.workspaceDB.findById(update.workspaceID);
-        if (!workspace) {
-            log.error("Failed to find workspace for prebuild", { ...update });
-            return;
-        }
-
-        const prebuildWithStatus: PrebuildWithStatus = {
-            info: info,
-            status: update.status,
-            workspace,
-        };
 
         for (const l of listeners) {
             try {
@@ -194,8 +185,12 @@ export class RedisSubscriber {
         this.disposables.dispose();
     }
 
-    listenForPrebuildUpdates(projectId: string, listener: PrebuildUpdateListener): Disposable {
+    listenForProjectPrebuildUpdates(projectId: string, listener: PrebuildUpdateListener): Disposable {
         return this.doRegister(projectId, listener, this.prebuildUpdateListeners, "prebuild");
+    }
+
+    listenForOrganizationPrebuildUpdates(organizationId: string, listener: PrebuildUpdateListener): Disposable {
+        return this.doRegister(organizationId, listener, this.prebuildUpdateListeners, "prebuild");
     }
 
     listenForPrebuildUpdatableEvents(listener: HeadlessWorkspaceEventListener): Disposable {

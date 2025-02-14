@@ -12,11 +12,9 @@ import { useOnBlurError } from "../hooks/use-onblur-error";
 import { openOIDCStartWindow } from "../provider-utils";
 import { useFeatureFlag } from "../data/featureflag-query";
 import { useLocation } from "react-router";
-
-type Props = {
-    singleOrgMode?: boolean;
-    onSuccess: () => void;
-};
+import { useOnboardingState } from "../dedicated-setup/use-needs-setup";
+import { getOrgSlugFromQuery } from "../data/organizations/orgs-query";
+import { storageAvailable } from "../utils";
 
 function getOrgSlugFromPath(path: string) {
     // '/login/acme' => ['', 'login', 'acme']
@@ -27,11 +25,16 @@ function getOrgSlugFromPath(path: string) {
     return pathSegments[2];
 }
 
-export const SSOLoginForm: FC<Props> = ({ singleOrgMode, onSuccess }) => {
+type Props = {
+    onSuccess: () => void;
+};
+export const SSOLoginForm: FC<Props> = ({ onSuccess }) => {
     const location = useLocation();
+    const { data: onboardingState } = useOnboardingState();
+    const singleOrgMode = (onboardingState?.organizationCountTotal || 0) < 2;
 
     const [orgSlug, setOrgSlug] = useState(
-        getOrgSlugFromPath(location.pathname) || window.localStorage.getItem("sso-org-slug") || "",
+        getOrgSlugFromPath(location.pathname) || getOrgSlugFromQuery(location.search) || readSSOOrgSlug() || "",
     );
     const [error, setError] = useState("");
 
@@ -40,7 +43,7 @@ export const SSOLoginForm: FC<Props> = ({ singleOrgMode, onSuccess }) => {
     const openLoginWithSSO = useCallback(
         async (e: React.FormEvent<HTMLFormElement>) => {
             e.preventDefault();
-            window.localStorage.setItem("sso-org-slug", orgSlug.trim());
+            persistSSOOrgSlug(orgSlug.trim());
 
             try {
                 await openOIDCStartWindow({
@@ -78,7 +81,7 @@ export const SSOLoginForm: FC<Props> = ({ singleOrgMode, onSuccess }) => {
             <div className="mt-10 space-y-2 w-56">
                 {!singleOrgMode && (
                     <TextInputField
-                        label="Organization Slug"
+                        label="Organization"
                         placeholder="my-organization"
                         value={orgSlug}
                         onChange={setOrgSlug}
@@ -99,3 +102,18 @@ export const SSOLoginForm: FC<Props> = ({ singleOrgMode, onSuccess }) => {
         </form>
     );
 };
+
+function readSSOOrgSlug(): string | undefined {
+    const isLocalStorageAvailable = storageAvailable("localStorage");
+    if (isLocalStorageAvailable) {
+        return window.localStorage.getItem("sso-org-slug") || undefined;
+    }
+    return undefined;
+}
+
+function persistSSOOrgSlug(slug: string) {
+    const isLocalStorageAvailable = storageAvailable("localStorage");
+    if (isLocalStorageAvailable) {
+        window.localStorage.setItem("sso-org-slug", slug.trim());
+    }
+}

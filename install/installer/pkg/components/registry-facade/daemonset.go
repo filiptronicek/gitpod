@@ -72,7 +72,6 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 		hashObj = append(hashObj, objs...)
 	}
 
-	//nolint:typecheck
 	configHash, err := common.ObjectHash(hashObj, nil)
 	if err != nil {
 		return nil, err
@@ -191,9 +190,7 @@ func daemonset(ctx *common.RenderContext) ([]runtime.Object, error) {
 					InitContainers:                initContainers,
 					Tolerations: []corev1.Toleration{
 						{
-							Key:      "gitpod.io/gpu",
 							Operator: "Exists",
-							Effect:   "NoSchedule",
 						},
 					},
 					Containers: []corev1.Container{{

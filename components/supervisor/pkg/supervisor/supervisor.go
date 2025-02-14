@@ -42,6 +42,7 @@ import (
 	"github.com/prometheus/common/route"
 	"github.com/soheilhy/cmux"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 	"golang.org/x/xerrors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -188,6 +189,16 @@ func Run(options ...RunOption) {
 		return
 	}
 
+	var (
+		ideReady                       = newIDEReadyState(&cfg.IDE)
+		desktopIdeReady *ideReadyState = nil
+
+		cstate        = NewInMemoryContentState(cfg.RepoRoot)
+		gitpodService serverapi.APIInterface
+
+		notificationService = NewNotificationService()
+	)
+
 	endpoint, host, err := cfg.GitpodAPIEndpoint()
 	if err != nil {
 		log.WithError(err).Fatal("cannot find Gitpod API endpoint")
@@ -201,10 +212,7 @@ func Run(options ...RunOption) {
 
 	// BEWARE: we can only call buildChildProcEnv once, because it might download env vars from a one-time-secret
 	//         URL, which would fail if we tried another time.
-	isSetJavaXmx := experiments.IsSetJavaXmx(context.Background(), exps, experiments.Attributes{
-		UserID: cfg.OwnerId,
-	})
-	childProcEnvvars = buildChildProcEnv(cfg, nil, opts.RunGP, isSetJavaXmx)
+	childProcEnvvars = buildChildProcEnv(cfg, nil, opts.RunGP)
 
 	err = AddGitpodUserIfNotExists()
 	if err != nil {
@@ -212,7 +220,7 @@ func Run(options ...RunOption) {
 	}
 	symlinkBinaries(cfg)
 
-	configureGit(cfg)
+	configureGit(cfg, cstate.ContentReady())
 
 	telemetry := analytics.NewFromEnvironment()
 	defer telemetry.Close()
@@ -262,16 +270,6 @@ func Run(options ...RunOption) {
 		internalPorts = append(internalPorts, debugProxyPort)
 	}
 
-	var (
-		ideReady                       = newIDEReadyState(&cfg.IDE)
-		desktopIdeReady *ideReadyState = nil
-
-		cstate        = NewInMemoryContentState(cfg.RepoRoot)
-		gitpodService serverapi.APIInterface
-
-		notificationService = NewNotificationService()
-	)
-
 	if !opts.RunGP {
 		gitpodService = serverapi.NewServerApiService(ctx, &serverapi.ServiceConfig{
 			Host:              host,
@@ -281,7 +279,7 @@ func Run(options ...RunOption) {
 			OwnerID:           cfg.OwnerId,
 			SupervisorVersion: Version,
 			ConfigcatEnabled:  cfg.ConfigcatEnabled,
-		}, tokenService, exps)
+		}, tokenService)
 	}
 
 	if cfg.GetDesktopIDE() != nil {
@@ -338,6 +336,7 @@ func Run(options ...RunOption) {
 		}
 	}
 
+	willShutdownCtx, fireWillShutdown := context.WithCancel(ctx)
 	termMux := terminal.NewMux()
 	termMuxSrv := terminal.NewMuxTerminalService(termMux)
 	termMuxSrv.DefaultWorkdir = cfg.RepoRoot
@@ -358,6 +357,9 @@ func Run(options ...RunOption) {
 		Uid: gitpodUID,
 		Gid: gitpodGID,
 	}
+	if !cfg.isHeadless() {
+		termMuxSrv.DefaultAmbientCaps = grantCapSysPtrace(termMuxSrv.DefaultAmbientCaps)
+	}
 
 	taskManager := newTasksManager(cfg, termMuxSrv, cstate, nil, ideReady, desktopIdeReady)
 
@@ -375,7 +377,8 @@ func Run(options ...RunOption) {
 		go gitStatusService.Run(gitStatusCtx, gitStatusWg)
 	}
 
-	willShutdownCtx, fireWillShutdown := context.WithCancel(ctx)
+	taskServiceWg := &sync.WaitGroup{}
+
 	apiServices := []RegisterableService{
 		&statusService{
 			willShutdownCtx: willShutdownCtx,
@@ -390,8 +393,13 @@ func Run(options ...RunOption) {
 		RegistrableTokenService{Service: tokenService},
 		notificationService,
 		NewInfoService(cfg, cstate, gitpodService),
-		&ControlService{portsManager: portMgmt},
+		&ControlService{portsManager: portMgmt, gitpodService: gitpodService},
 		&portService{portsManager: portMgmt},
+		&taskService{
+			wg:              taskServiceWg,
+			tasksManager:    taskManager,
+			willShutdownCtx: willShutdownCtx,
+		},
 	}
 	apiServices = append(apiServices, additionalServices...)
 
@@ -461,7 +469,7 @@ func Run(options ...RunOption) {
 
 	if cfg.isHeadless() {
 		wg.Add(1)
-		go stopWhenTasksAreDone(ctx, &wg, shutdown, tasksSuccessChan)
+		go stopWhenTasksAreDone(&wg, cfg, shutdown, tasksSuccessChan)
 	} else if !opts.RunGP {
 		wg.Add(1)
 		go portMgmt.Run(ctx, &wg)
@@ -486,7 +494,7 @@ func Run(options ...RunOption) {
 
 				start := time.Now()
 				defer func() {
-					log.Debugf("unshallow of local repository took %v", time.Since(start))
+					log.WithField("duration", time.Since(start).String()).Debugf("unshallow of local repository took %v", time.Since(start))
 				}()
 
 				if !isShallowRepository(repoRoot) {
@@ -520,6 +528,11 @@ func Run(options ...RunOption) {
 	stopGitStatus()
 	gitStatusWg.Wait()
 
+	cleanExit := waitWithTimeout(taskServiceWg, 2*time.Second)
+	if !cleanExit {
+		log.Warn("task service did not finish in time, force closing")
+	}
+
 	terminalShutdownCtx, cancelTermination := context.WithTimeout(context.Background(), cfg.GetTerminationGracePeriod())
 	defer cancelTermination()
 	cancel()
@@ -528,6 +541,21 @@ func Run(options ...RunOption) {
 	termMux.Close(terminalShutdownCtx)
 
 	wg.Wait()
+}
+
+// Based off of https://stackoverflow.com/questions/32840687/timeout-for-waitgroup-wait/32843750#32843750
+func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	c := make(chan struct{})
+	go func() {
+		defer close(c)
+		wg.Wait()
+	}()
+	select {
+	case <-c:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func getIDENotReadyShutdownDuration(ctx context.Context, exps experiments.Client, gitpodHost string) (bool, time.Duration) {
@@ -723,7 +751,7 @@ func installDotfiles(ctx context.Context, cfg *Config, tokenService *InMemoryTok
 			}
 
 			// write some feedback to the terminal
-			out.WriteString(fmt.Sprintf("# echo linking %s -> %s\n", path, homeFN))
+			_, _ = out.WriteString(fmt.Sprintf("# echo linking %s -> %s\n", path, homeFN))
 
 			return os.Symlink(path, homeFN)
 		})
@@ -776,7 +804,7 @@ func symlinkBinaries(cfg *Config) {
 	}
 }
 
-func configureGit(cfg *Config) {
+func configureGit(cfg *Config, contentReady <-chan struct{}) {
 	settings := [][]string{
 		{"push.default", "simple"},
 		{"alias.lg", "log --color --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit"},
@@ -800,6 +828,44 @@ func configureGit(cfg *Config) {
 			log.WithError(err).WithField("args", s).Warn("git config error")
 		}
 	}
+
+	go func() {
+		<-contentReady
+		if cfg.CommitAnnotationEnabled && !cfg.isHeadless() {
+			if err := setupGitMessageHook(filepath.Join(cfg.RepoRoot, ".git", "hooks")); err != nil {
+				log.WithError(err).Error("cannot setup git message hook")
+			}
+		}
+	}()
+}
+
+const hookContent = `#!/bin/sh
+exec /usr/bin/gp git-commit-message-helper --file "$1"
+`
+
+func setupGitMessageHook(path string) error {
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return err
+	}
+
+	fn := filepath.Join(path, "prepare-commit-msg")
+	// do not override existing hooks
+	if _, err := os.Stat(fn); err == nil {
+		return nil
+	}
+	if err := os.WriteFile(fn, []byte(hookContent), 0755); err != nil {
+		return err
+	}
+
+	// Change ownership of both path and file to the gitpod user
+	if err := os.Chown(path, gitpodUID, gitpodGID); err != nil {
+		return err
+	}
+	if err := os.Chown(fn, gitpodUID, gitpodGID); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func hasMetadataAccess() bool {
@@ -983,7 +1049,7 @@ func launchIDE(cfg *Config, ideConfig *IDEConfig, cmd *exec.Cmd, ideStopped chan
 
 			ideWasReady, _ := ideReady.Get()
 			if !ideWasReady {
-				log.WithField("ide", ide.String()).WithError(err).Fatal("IDE failed to start")
+				log.WithField("ide", ide.String()).WithError(err).Fatal("IDE failed before becoming ready")
 				return
 			}
 		}
@@ -1012,6 +1078,8 @@ func prepareIDELaunch(cfg *Config, ideConfig *IDEConfig) *exec.Cmd {
 	cmd.SysProcAttr.Setpgid = true
 	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
 
+	cmd.SysProcAttr.AmbientCaps = grantCapSysPtrace(cmd.SysProcAttr.AmbientCaps)
+
 	// Here we must resist the temptation to "neaten up" the IDE output for headless builds.
 	// This would break the JSON parsing of the headless builds.
 	cmd.Stdout = os.Stdout
@@ -1030,7 +1098,7 @@ func prepareIDELaunch(cfg *Config, ideConfig *IDEConfig) *exec.Cmd {
 // of envvars. If envvars is nil, os.Environ() is used.
 //
 // Beware: if config contains an OTS URL the results may differ on subsequent calls.
-func buildChildProcEnv(cfg *Config, envvars []string, runGP bool, setJavaXmx bool) []string {
+func buildChildProcEnv(cfg *Config, envvars []string, runGP bool) []string {
 	if envvars == nil {
 		envvars = os.Environ()
 	}
@@ -1106,8 +1174,18 @@ func buildChildProcEnv(cfg *Config, envvars []string, runGP bool, setJavaXmx boo
 	envs["HOME"] = "/home/gitpod"
 	envs["USER"] = "gitpod"
 
+	if cpuCount, ok := envs["GITPOD_CPU_COUNT"]; ok && cfg.IsSetJavaProcessorCount {
+		if _, exists := envs["JAVA_TOOL_OPTIONS"]; exists {
+			// check if the JAVA_TOOL_OPTIONS already contains the ActiveProcessorCount flag
+			if !strings.Contains(envs["JAVA_TOOL_OPTIONS"], "-XX:ActiveProcessorCount=") {
+				envs["JAVA_TOOL_OPTIONS"] += fmt.Sprintf(" -XX:+UseContainerSupport -XX:ActiveProcessorCount=%s", cpuCount)
+			}
+		} else {
+			envs["JAVA_TOOL_OPTIONS"] = fmt.Sprintf("-XX:+UseContainerSupport -XX:ActiveProcessorCount=%s", cpuCount)
+		}
+	}
 	// Particular Java optimisation: Java pre v10 did not gauge it's available memory correctly, and needed explicitly setting "-Xmx" for all Hotspot/openJDK VMs
-	if mem, ok := envs["GITPOD_MEMORY"]; ok && setJavaXmx {
+	if mem, ok := envs["GITPOD_MEMORY"]; ok && cfg.IsSetJavaXmx {
 		envs["JAVA_TOOL_OPTIONS"] += fmt.Sprintf(" -Xmx%sm", mem)
 	}
 
@@ -1350,7 +1428,7 @@ func startAPIEndpoint(
 			reg.RegisterGRPC(grpcServer)
 		}
 		if reg, ok := reg.(RegisterableRESTService); ok {
-			err := reg.RegisterREST(restMux, grpcEndpoint)
+			err := reg.RegisterREST(ctx, restMux, grpcEndpoint)
 			if err != nil {
 				log.WithError(err).Fatal("cannot register REST service")
 			}
@@ -1466,13 +1544,19 @@ func startAPIEndpoint(
 		}))
 		routes.Handle("/_supervisor"+pprof.Path, http.StripPrefix("/_supervisor", pprof.Handler()))
 	}
-	go http.Serve(httpMux, routes)
+
+	server := &http.Server{Handler: routes}
+	go func(l net.Listener) {
+		if err := server.Serve(l); err != http.ErrServerClosed {
+			log.WithError(err).Error("API endpoint closed")
+		}
+	}(httpMux)
 
 	go m.Serve()
 
 	<-ctx.Done()
 	log.Info("shutting down API endpoint")
-	l.Close()
+	server.Shutdown(ctx)
 }
 
 func tunnelOverWebSocket(tunneled *ports.TunneledPortsService, conn *gitpod.WebsocketConnection) {
@@ -1553,15 +1637,27 @@ func tunnelOverSSH(ctx context.Context, tunneled *ports.TunneledPortsService, ne
 	<-ctx.Done()
 }
 
-func stopWhenTasksAreDone(ctx context.Context, wg *sync.WaitGroup, shutdown chan ShutdownReason, successChan <-chan taskSuccess) {
+func stopWhenTasksAreDone(wg *sync.WaitGroup, cfg *Config, shutdown chan ShutdownReason, successChan <-chan taskSuccess) {
 	defer wg.Done()
 	defer close(shutdown)
 
 	success := <-successChan
 	if success.Failed() {
+		var msg string
+		if cfg.isImageBuild() {
+			logFromFile, err := os.ReadFile("/workspace/.gitpod/bob.log")
+			debugMsg := "Debug this using `gp validate` (visit https://www.gitpod.io/docs/configure/workspaces#validate-your-gitpod-configuration) to learn more"
+			if err != nil {
+				log.WithError(err).Error("err while reading bob.log")
+				msg = fmt.Sprintf("image build failed: %s. %s", string(success), debugMsg)
+			} else {
+				msg = fmt.Sprintf("image build failed: %s. %s", string(logFromFile), debugMsg)
+			}
+		} else {
+			msg = fmt.Sprintf("headless task failed: %s", string(success))
+		}
 		// we signal task failure via kubernetes termination log
-		msg := []byte("headless task failed: " + string(success))
-		err := ioutil.WriteFile("/dev/termination-log", msg, 0o644)
+		err := os.WriteFile("/dev/termination-log", []byte(msg), 0o644)
 		if err != nil {
 			log.WithError(err).Error("err while writing termination log")
 		}
@@ -1925,4 +2021,10 @@ func waitForIde(parent context.Context, ideReady *ideReadyState, desktopIdeReady
 	case <-desktopIdeReady.Wait():
 	}
 	return true, ""
+}
+
+// We grant ptrace for IDE, terminal, ssh and their child process
+// It's make IDE attach more easier
+func grantCapSysPtrace(caps []uintptr) []uintptr {
+	return append(caps, unix.CAP_SYS_PTRACE)
 }

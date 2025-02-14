@@ -9,7 +9,7 @@ import { IDEOptions } from "@gitpod/gitpod-protocol/lib/ide-protocol";
 import { ErrorCodes } from "@gitpod/gitpod-protocol/lib/messaging/error";
 import EventEmitter from "events";
 import * as queryString from "query-string";
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useEffect, useMemo } from "react";
 import { v4 } from "uuid";
 import Arrow from "../components/Arrow";
 import ContextMenu from "../components/ContextMenu";
@@ -35,6 +35,8 @@ import {
 } from "@gitpod/public-api/lib/gitpod/v1/workspace_pb";
 import { PartialMessage } from "@bufbuild/protobuf";
 import { trackEvent } from "../Analytics";
+import { fromWorkspaceName } from "../workspaces/RenameWorkspaceModal";
+import { LinkButton } from "@podkit/buttons/LinkButton";
 
 const sessionId = v4();
 
@@ -54,7 +56,7 @@ export function parseProps(workspaceId: string, search?: string): StartWorkspace
     const runsInIFrame = window.top !== window.self;
     return {
         workspaceId,
-        runsInIFrame: window.top !== window.self,
+        runsInIFrame,
         // Either:
         //  - not_found: we were sent back from a workspace cluster/IDE URL where we expected a workspace to be running but it wasn't because either:
         //    - this is a (very) old tab and the workspace already timed out
@@ -86,7 +88,7 @@ function parseParameters(search?: string): { notFound?: boolean } {
 
 export interface StartWorkspaceState {
     /**
-     * This is set to the istanceId we started (think we started on).
+     * This is set to the instanceId we started (think we started on).
      * We only receive updates for this particular instance, or none if not set.
      */
     startedInstanceId?: string;
@@ -101,6 +103,14 @@ export interface StartWorkspaceState {
     ideOptions?: IDEOptions;
     isSSHModalVisible?: boolean;
     ownerToken?: string;
+    /**
+     * Set to prevent multiple redirects to the same URL when the User Agent ignores our wish to open links in the same tab (by setting window.location.href).
+     */
+    redirected?: boolean;
+    /**
+     * Determines whether `redirected` has been `true` for long enough to display our "new tab" info banner without racing with same-tab redirection in regular setups
+     */
+    showRedirectMessage?: boolean;
 }
 
 // TODO: use Function Components
@@ -143,6 +153,11 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                     await this.onWorkspaceUpdate(
                         new Workspace({
                             ...this.state.workspace,
+                            // NOTE: this.state.workspace might be undefined here, leaving Workspace.id, Workspace.metadata and Workspace.spec undefined empty.
+                            // Thus we:
+                            //  - fill in ID
+                            //  - wait for fetchWorkspaceInfo to fill in metadata and spec in later render cycles
+                            id: resp.workspaceId,
                             status: resp.status,
                         }),
                     );
@@ -177,7 +192,7 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
         this.toDispose.dispose();
     }
 
-    componentDidUpdate(prevPros: StartWorkspaceProps, prevState: StartWorkspaceState) {
+    componentDidUpdate(_prevProps: StartWorkspaceProps, prevState: StartWorkspaceState) {
         const newPhase = this.state?.workspace?.status?.phase?.name;
         const oldPhase = prevState.workspace?.status?.phase?.name;
         const type = this.state.workspace?.spec?.type === WorkspaceSpec_WorkspaceType.PREBUILD ? "prebuild" : "regular";
@@ -227,7 +242,7 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                 return;
             }
             // TODO: Remove this once we use `useStartWorkspaceMutation`
-            // Start listening too instance updates - and explicitly query state once to guarantee we get at least one update
+            // Start listening to instance updates - and explicitly query state once to guarantee we get at least one update
             // (needed for already started workspaces, and not hanging in 'Starting ...' for too long)
             this.fetchWorkspaceInfo(result.workspace?.status?.instanceId);
         } catch (error) {
@@ -321,8 +336,8 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
         this.setState({ ideOptions });
     }
 
-    private async onWorkspaceUpdate(workspace: Workspace) {
-        if (!workspace.status?.instanceId) {
+    private async onWorkspaceUpdate(workspace?: Workspace) {
+        if (!workspace?.status?.instanceId || !workspace.id) {
             return;
         }
         // Here we filter out updates to instances we haven't started to avoid issues with updates coming in out-of-order
@@ -360,6 +375,9 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                 // scenarios with distributed workspace bridges (control loops): We might receive the update, but the backend might not have the token, yet.
                 // So we have to ask again, and wait until we're actually successful (it returns immediately on the happy path)
                 await this.ensureWorkspaceAuth(workspace.status!.instanceId, true);
+                if (this.state.error && this.state.error?.code !== ErrorCodes.NOT_FOUND) {
+                    return;
+                }
                 this.redirectTo(workspace.status!.workspaceUrl);
             })().catch(console.error);
             return;
@@ -449,11 +467,20 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
     }
 
     redirectTo(url: string) {
+        if (this.state.redirected) {
+            console.info("Prevented another redirect", { url });
+            return;
+        }
         if (this.props.runsInIFrame) {
             this.ideFrontendService?.relocate(url);
         } else {
             window.location.href = url;
         }
+
+        this.setState({ redirected: true });
+        setTimeout(() => {
+            this.setState({ showRedirectMessage: true });
+        }, 2000);
     }
 
     private openDesktopLink(link: string) {
@@ -494,7 +521,7 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                 return <ImageBuildView workspaceId={this.state.workspace.id} />;
 
             // Pending means the workspace does not yet consume resources in the cluster, but rather is looking for
-            // some space within the cluster. If for example the cluster needs to scale up to accomodate the
+            // some space within the cluster. If for example the cluster needs to scale up to accommodate the
             // workspace, the workspace will be in Pending state until that happened.
             case WorkspacePhase_Phase.PENDING:
                 phase = StartPhase.Preparing;
@@ -558,11 +585,11 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                     statusMessage = (
                         <div>
                             <p className="text-base text-gray-400">Opening Workspace …</p>
-                            <div className="flex space-x-3 items-center text-left rounded-xl m-auto px-4 h-16 w-72 mt-4 mb-2 bg-gray-100 dark:bg-gray-800">
+                            <div className="flex space-x-3 items-center text-left rounded-xl m-auto px-4 h-16 w-72 mt-4 mb-2 bg-pk-surface-secondary">
                                 <div className="rounded-full w-3 h-3 text-sm bg-green-500">&nbsp;</div>
                                 <div>
                                     <p className="text-gray-700 dark:text-gray-200 font-semibold w-56 truncate">
-                                        {this.state.workspace.id}
+                                        {fromWorkspaceName(this.state.workspace) || this.state.workspace.id}
                                     </p>
                                     <a target="_parent" href={contextURL}>
                                         <p className="w-56 truncate hover:text-blue-600 dark:hover:text-blue-400">
@@ -663,11 +690,11 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                 phase = StartPhase.Stopping;
                 statusMessage = (
                     <div>
-                        <div className="flex space-x-3 items-center text-left rounded-xl m-auto px-4 h-16 w-72 mt-4 bg-gray-100 dark:bg-gray-800">
+                        <div className="flex space-x-3 items-center text-left rounded-xl m-auto px-4 h-16 w-72 mt-4 bg-pk-surface-secondary">
                             <div className="rounded-full w-3 h-3 text-sm bg-kumquat-ripe">&nbsp;</div>
                             <div>
                                 <p className="text-gray-700 dark:text-gray-200 font-semibold w-56 truncate">
-                                    {this.state.workspace.id}
+                                    {fromWorkspaceName(this.state.workspace) || this.state.workspace.id}
                                 </p>
                                 <a target="_parent" href={contextURL}>
                                     <p className="w-56 truncate hover:text-blue-600 dark:hover:text-blue-400">
@@ -708,11 +735,11 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                 }
                 statusMessage = (
                     <div>
-                        <div className="flex space-x-3 items-center text-left rounded-xl m-auto px-4 h-16 w-72 mt-4 mb-2 bg-gray-100 dark:bg-gray-800">
+                        <div className="flex space-x-3 items-center text-left rounded-xl m-auto px-4 h-16 w-72 mt-4 mb-2 bg-pk-surface-secondary">
                             <div className="rounded-full w-3 h-3 text-sm bg-gray-300">&nbsp;</div>
                             <div>
                                 <p className="text-gray-700 dark:text-gray-200 font-semibold w-56 truncate">
-                                    {this.state.workspace.id}
+                                    {fromWorkspaceName(this.state.workspace) || this.state.workspace.id}
                                 </p>
                                 <a target="_parent" href={contextURL}>
                                     <p className="w-56 truncate hover:text-blue-600 dark:hover:text-blue-400">
@@ -721,7 +748,10 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                                 </a>
                             </div>
                         </div>
-                        <PendingChangesDropdown gitStatus={this.state.workspace.status.gitStatus} />
+                        <PendingChangesDropdown
+                            gitStatus={this.state.workspace.status.gitStatus}
+                            className="justify-center"
+                        />
                         <div className="mt-10 justify-center flex space-x-2">
                             <a target="_parent" href={gitpodHostUrl.asWorkspacePage().toString()}>
                                 <Button variant="secondary">Go to Dashboard</Button>
@@ -734,6 +764,7 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                 );
                 break;
         }
+
         return (
             <StartPage
                 phase={phase}
@@ -743,6 +774,30 @@ export default class StartWorkspace extends React.Component<StartWorkspaceProps,
                 workspaceId={this.props.workspaceId}
             >
                 {statusMessage}
+                {this.state.showRedirectMessage && (
+                    <>
+                        <Alert type="info" className="mt-4 w-112">
+                            We redirected you to your workspace, but your browser probably opened it in another tab.
+                        </Alert>
+
+                        <div className="mt-4 justify-center flex space-x-2">
+                            <LinkButton href={gitpodHostUrl.asWorkspacePage().toString()} target="_self" isExternalUrl>
+                                Go to Dashboard
+                            </LinkButton>
+                            {this.state.workspace?.status?.workspaceUrl &&
+                                this.state.workspace.status.phase?.name === WorkspacePhase_Phase.RUNNING && (
+                                    <LinkButton
+                                        variant={"secondary"}
+                                        href={this.state.workspace.status.workspaceUrl}
+                                        target="_self"
+                                        isExternalUrl
+                                    >
+                                        Re-open Workspace
+                                    </LinkButton>
+                                )}
+                        </div>
+                    </>
+                )}
             </StartPage>
         );
     }
@@ -756,7 +811,7 @@ interface ImageBuildViewProps {
 }
 
 function ImageBuildView(props: ImageBuildViewProps) {
-    const [logsEmitter] = useState(new EventEmitter());
+    const logsEmitter = useMemo(() => new EventEmitter(), []);
 
     useEffect(() => {
         let registered = false;
@@ -787,10 +842,11 @@ function ImageBuildView(props: ImageBuildViewProps) {
                 info: WorkspaceImageBuild.StateInfo,
                 content?: WorkspaceImageBuild.LogContent,
             ) => {
-                if (!content) {
+                if (!content?.data) {
                     return;
                 }
-                logsEmitter.emit("logs", content.text);
+                const chunk = new Uint8Array(content.data);
+                logsEmitter.emit("logs", chunk);
             },
         });
 
@@ -803,7 +859,7 @@ function ImageBuildView(props: ImageBuildViewProps) {
     return (
         <StartPage title="Building Image" phase={props.phase} workspaceId={props.workspaceId}>
             <Suspense fallback={<div />}>
-                <WorkspaceLogs logsEmitter={logsEmitter} errorMessage={props.error?.message} />
+                <WorkspaceLogs taskId="image-build" logsEmitter={logsEmitter} errorMessage={props.error?.message} />
             </Suspense>
             {!!props.onStartWithDefaultImage && (
                 <>
@@ -812,7 +868,7 @@ function ImageBuildView(props: ImageBuildViewProps) {
                             💡 You can use the <code>gp validate</code> command to validate the workspace configuration
                             from the editor terminal. &nbsp;
                             <a
-                                href="https://www.gitpod.io/docs/configure/workspaces/workspace-image#trying-out-changes-to-your-dockerfile"
+                                href="https://www.gitpod.io/docs/configure/workspaces#validate-your-gitpod-configuration"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="gp-link"

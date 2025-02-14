@@ -12,7 +12,6 @@ import {
     Project,
     User,
     WorkspaceConfig,
-    WorkspaceImageBuild,
     WorkspaceInstancePort,
 } from "@gitpod/gitpod-protocol";
 import { Experiments } from "@gitpod/gitpod-protocol/lib/experiments/configcat-server";
@@ -50,9 +49,7 @@ describe("WorkspaceService", async () => {
                 },
             }),
         } as any as ConfigProvider);
-        Experiments.configureTestingClient({
-            centralizedPermissions: true,
-        });
+        Experiments.configureTestingClient({});
         const userService = container.get(UserService);
 
         // create the owner
@@ -84,7 +81,6 @@ describe("WorkspaceService", async () => {
         project = await projectService.createProject(
             {
                 name: "my-project",
-                slug: "my-project",
                 teamId: org.id,
                 cloneUrl: "https://github.com/gitpod-io/gitpod",
                 appInstallationId: "noid",
@@ -491,24 +487,19 @@ describe("WorkspaceService", async () => {
     it("should watchWorkspaceImageBuildLogs", async () => {
         const svc = container.get(WorkspaceService);
         const ws = await createTestWorkspace(svc, org, owner, project);
-        const client = {
-            onWorkspaceImageBuildLogs: (
-                info: WorkspaceImageBuild.StateInfo,
-                content: WorkspaceImageBuild.LogContent | undefined,
-            ) => {},
-        };
+        const receiver = async (chunk: Uint8Array) => {};
 
-        await svc.watchWorkspaceImageBuildLogs(owner.id, ws.id, client); // returns without error in case of non-running workspace
+        await svc.watchWorkspaceImageBuildLogs(owner.id, ws.id, receiver); // returns without error in case of non-running workspace
 
         await expectError(
             ErrorCodes.PERMISSION_DENIED,
-            svc.watchWorkspaceImageBuildLogs(member.id, ws.id, client),
+            svc.watchWorkspaceImageBuildLogs(member.id, ws.id, receiver),
             "should fail for member on not-shared workspace",
         );
 
         await expectError(
             ErrorCodes.NOT_FOUND,
-            svc.watchWorkspaceImageBuildLogs(stranger.id, ws.id, client),
+            svc.watchWorkspaceImageBuildLogs(stranger.id, ws.id, receiver),
             "should fail for stranger on not-shared workspace",
         );
     });
@@ -516,18 +507,13 @@ describe("WorkspaceService", async () => {
     it("should watchWorkspaceImageBuildLogs - shared", async () => {
         const svc = container.get(WorkspaceService);
         const ws = await createTestWorkspace(svc, org, owner, project);
-        const client = {
-            onWorkspaceImageBuildLogs: (
-                info: WorkspaceImageBuild.StateInfo,
-                content: WorkspaceImageBuild.LogContent | undefined,
-            ) => {},
-        };
+        const receiver = async (chunk: Uint8Array) => {};
 
         await svc.controlAdmission(owner.id, ws.id, "everyone");
 
-        await svc.watchWorkspaceImageBuildLogs(owner.id, ws.id, client); // returns without error in case of non-running workspace
-        await svc.watchWorkspaceImageBuildLogs(member.id, ws.id, client);
-        await svc.watchWorkspaceImageBuildLogs(stranger.id, ws.id, client);
+        await svc.watchWorkspaceImageBuildLogs(owner.id, ws.id, receiver); // returns without error in case of non-running workspace
+        await svc.watchWorkspaceImageBuildLogs(member.id, ws.id, receiver);
+        await svc.watchWorkspaceImageBuildLogs(stranger.id, ws.id, receiver);
     });
 
     it("should sendHeartBeat", async () => {
@@ -695,13 +681,15 @@ describe("WorkspaceService", async () => {
         const svc = container.get(WorkspaceService);
         const db = container.get<WorkspaceDB>(WorkspaceDB);
         const today = new Date();
-        const daysAgo = (days: number) => new Date(today.getTime() - 1000 * 60 * 60 * 24 * days);
+        const daysAgo = (days: number, from = today) => new Date(from.getTime() - 1000 * 60 * 60 * 24 * days);
 
         const ws = await createTestWorkspace(svc, org, owner, project);
-        await db.storeInstance({
+        await svc.updateDeletionEligibilityTime(owner.id, ws.id, true);
+        const instance = await db.storeInstance({
             id: v4(),
             workspaceId: ws.id,
-            creationTime: daysAgo(7).toISOString(),
+            // tomorrow, because as of #20271 deletion eligibility times can't go backwards and those are set when creating a ws
+            creationTime: daysAgo(-1).toISOString(),
             status: {
                 conditions: {},
                 phase: "stopped",
@@ -714,22 +702,24 @@ describe("WorkspaceService", async () => {
             workspaceImage: "",
         });
 
-        await svc.updateDeletionEligabilityTime(owner.id, ws.id);
+        await svc.updateDeletionEligibilityTime(owner.id, ws.id);
 
         const workspace = await svc.getWorkspace(owner.id, ws.id);
         expect(workspace).to.not.be.undefined;
         expect(workspace.workspace.deletionEligibilityTime).to.not.be.undefined;
-        expect(workspace.workspace.deletionEligibilityTime).to.eq(daysAgo(7 - 14).toISOString());
+        expect(workspace.workspace.deletionEligibilityTime).to.eq(
+            daysAgo(-14, new Date(instance.creationTime)).toISOString(),
+        );
     });
 
     it("should update the deletion eligibility time of a workspace with git changes", async () => {
         const svc = container.get(WorkspaceService);
         const db = container.get<WorkspaceDB>(WorkspaceDB);
         const today = new Date();
-        const daysAgo = (days: number) => new Date(today.getTime() - 1000 * 60 * 60 * 24 * days);
+        const daysAgo = (days: number, from = today) => new Date(from.getTime() - 1000 * 60 * 60 * 24 * days);
 
         const ws = await createTestWorkspace(svc, org, owner, project);
-        await db.storeInstance({
+        const instance = await db.storeInstance({
             id: v4(),
             workspaceId: ws.id,
             creationTime: daysAgo(7).toISOString(),
@@ -748,12 +738,14 @@ describe("WorkspaceService", async () => {
             workspaceImage: "",
         });
 
-        await svc.updateDeletionEligabilityTime(owner.id, ws.id);
+        await svc.updateDeletionEligibilityTime(owner.id, ws.id);
 
         const workspace = await svc.getWorkspace(owner.id, ws.id);
         expect(workspace).to.not.be.undefined;
         expect(workspace.workspace.deletionEligibilityTime).to.not.be.undefined;
-        expect(workspace.workspace.deletionEligibilityTime).to.eq(daysAgo(7 - 14 * 2).toISOString());
+        expect(workspace.workspace.deletionEligibilityTime).to.eq(
+            daysAgo(-14 * 2, new Date(instance.creationTime)).toISOString(),
+        );
     });
 
     it("should update the deletion eligibility time of a prebuild", async () => {
@@ -784,7 +776,7 @@ describe("WorkspaceService", async () => {
             workspaceImage: "",
         });
 
-        await svc.updateDeletionEligabilityTime(owner.id, ws.id);
+        await svc.updateDeletionEligibilityTime(owner.id, ws.id);
 
         const workspace = await svc.getWorkspace(owner.id, ws.id);
         expect(workspace).to.not.be.undefined;

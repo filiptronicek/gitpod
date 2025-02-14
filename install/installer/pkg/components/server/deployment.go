@@ -66,7 +66,6 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 		},
 	})
 
-	//nolint:typecheck
 	configHash, err := common.ObjectHash(hashObj, nil)
 	if err != nil {
 		return nil, err
@@ -137,6 +136,16 @@ func deployment(ctx *common.RenderContext) ([]runtime.Object, error) {
 						Key: "password",
 					},
 				},
+			})
+		}
+		return nil
+	})
+
+	_ = ctx.WithExperimental(func(cfg *experimental.Config) error {
+		if cfg.WebApp != nil && cfg.WebApp.Server != nil && cfg.WebApp.Server.GoogleCloudProfilerEnabled {
+			env = append(env, corev1.EnvVar{
+				Name:  "GOOGLE_CLOUD_PROFILER",
+				Value: "true",
 			})
 		}
 		return nil

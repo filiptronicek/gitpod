@@ -6,10 +6,10 @@
 
 import { inject, injectable } from "inversify";
 import * as grpc from "@grpc/grpc-js";
-import { RedisPublisher, WorkspaceDB } from "@gitpod/gitpod-db/lib";
+import { ProjectDB, RedisPublisher, WorkspaceDB } from "@gitpod/gitpod-db/lib";
 import {
+    CommitContext,
     GetWorkspaceTimeoutResult,
-    GitpodClient,
     GitpodServer,
     HeadlessLogUrls,
     PortProtocol,
@@ -20,9 +20,9 @@ import {
     StartWorkspaceResult,
     User,
     WORKSPACE_TIMEOUT_DEFAULT_SHORT,
+    WithPrebuild,
     Workspace,
     WorkspaceContext,
-    WorkspaceImageBuild,
     WorkspaceInfo,
     WorkspaceInstance,
     WorkspaceInstancePort,
@@ -58,10 +58,9 @@ import {
 import { LogContext, log } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { EntitlementService, MayStartWorkspaceResult } from "../billing/entitlement-service";
 import * as crypto from "crypto";
-import { getExperimentsClientForBackend } from "@gitpod/gitpod-protocol/lib/experiments/configcat-server";
 import { WorkspaceRegion, isWorkspaceRegion } from "@gitpod/gitpod-protocol/lib/workspace-cluster";
 import { RegionService } from "./region-service";
-import { ProjectsService } from "../projects/projects-service";
+import { LazyPrebuildManager, ProjectsService } from "../projects/projects-service";
 import { WorkspaceManagerClientProvider } from "@gitpod/ws-manager/lib/client-provider";
 import { SupportedWorkspaceClass } from "@gitpod/gitpod-protocol/lib/workspace-class";
 import { Config } from "../config";
@@ -75,6 +74,8 @@ import { SnapshotService } from "./snapshot-service";
 import { InstallationService } from "../auth/installation-service";
 import { PublicAPIConverter } from "@gitpod/public-api-common/lib/public-api-converter";
 import { WatchWorkspaceStatusResponse } from "@gitpod/public-api/lib/gitpod/v1/workspace_pb";
+import { ContextParser } from "./context-parser-service";
+import { scrubber, TrustedValue } from "@gitpod/gitpod-protocol/lib/util/scrubbing";
 
 export const GIT_STATUS_LENGTH_CAP_BYTES = 4096;
 
@@ -103,6 +104,9 @@ export class WorkspaceService {
         @inject(RedisPublisher) private readonly publisher: RedisPublisher,
         @inject(HeadlessLogService) private readonly headlessLogService: HeadlessLogService,
         @inject(Authorizer) private readonly auth: Authorizer,
+        @inject(ContextParser) private readonly contextParser: ContextParser,
+        @inject(LazyPrebuildManager) private readonly prebuildManager: LazyPrebuildManager,
+        @inject(ProjectDB) private readonly projectDB: ProjectDB,
 
         @inject(RedisSubscriber) private readonly subscriber: RedisSubscriber,
         @inject(PublicAPIConverter) private readonly apiConverter: PublicAPIConverter,
@@ -172,7 +176,7 @@ export class WorkspaceService {
         await this.workspaceClassChecking(ctx, user.id, organizationId, undefined, project, workspaceClass);
 
         // We don't want to be doing this in a transaction, because it calls out to external systems.
-        // TODO(gpl) Would be great to sepearate workspace creation from external calls
+        // TODO(gpl) Would be great to separate workspace creation from external calls
         const workspace = await this.factory.createForContext(
             ctx,
             user,
@@ -181,6 +185,34 @@ export class WorkspaceService {
             context,
             normalizedContextURL,
         );
+        log.info({ userId: user.id, workspaceId: workspace.id }, "workspace created", {
+            type: workspace.type,
+            ownerId: workspace.ownerId,
+            organizationId: workspace.organizationId,
+            projectId: project?.id,
+            projectName: scrubValue(project?.name),
+            contextURL: workspace.contextURL,
+            context: new TrustedValue<Partial<CommitContext & WithPrebuild>>({
+                normalizedContextURL: scrubValue(context.normalizedContextURL),
+                repository: CommitContext.is(context)
+                    ? {
+                          cloneUrl: scrubber.scrubValue(context.repository.cloneUrl),
+                          host: scrubber.scrubValue(context.repository.host),
+                          owner: scrubber.scrubValue(context.repository.owner),
+                          name: scrubber.scrubValue(context.repository.name),
+                          private: context.repository.private,
+                          defaultBranch: scrubValue(context.repository.defaultBranch),
+                      }
+                    : undefined,
+                ref: scrubValue(context.ref),
+                refType: CommitContext.is(context) ? context.refType : undefined,
+                revision: CommitContext.is(context) ? scrubValue(context.revision) : undefined,
+                wasPrebuilt: WithPrebuild.is(context) ? context.wasPrebuilt : undefined,
+                forceCreateNewWorkspace: context.forceCreateNewWorkspace,
+                forceImageBuild: context.forceImageBuild,
+                snapshotBucketId: WithPrebuild.is(context) ? scrubber.scrubValue(context.snapshotBucketId) : undefined,
+            }),
+        });
 
         // Instead, we fall back to removing access in case something goes wrong.
         try {
@@ -191,15 +223,18 @@ export class WorkspaceService {
             );
             throw err;
         }
-        await this.updateDeletionEligabilityTime(user.id, workspace.id);
+        this.asyncUpdateDeletionEligibilityTime(user.id, workspace.id, true);
+        this.asyncUpdateDeletionEligibilityTimeForUsedPrebuild(user.id, workspace);
+        if (project && workspace.type === "regular") {
+            this.asyncHandleUpdatePrebuildTriggerStrategy({ ctx, project, workspace, user });
+            this.asyncStartPrebuild({ ctx, project, workspace, user });
+        }
         return workspace;
     }
 
     async getWorkspace(userId: string, workspaceId: string): Promise<WorkspaceInfo> {
         const workspace = await this.doGetWorkspace(userId, workspaceId);
-
-        const latestInstancePromise = this.db.findCurrentInstance(workspaceId);
-        const latestInstance = await latestInstancePromise;
+        const latestInstance = await this.db.findCurrentInstance(workspaceId);
 
         return {
             workspace,
@@ -211,7 +246,7 @@ export class WorkspaceService {
         const res = await this.db.find({
             limit: 20,
             ...options,
-            userId, // gpl: We probably want to removed this limitation in the future, butkeeping the old behavior for now due to focus on FGA
+            userId, // gpl: We probably want to removed this limitation in the future, but keeping the old behavior for now due to focus on FGA
             includeHeadless: false,
         });
 
@@ -325,8 +360,11 @@ export class WorkspaceService {
         workspaceId: string,
         reason: string,
         policy?: StopWorkspacePolicy,
+        options: { skipPermissionCheck?: boolean } = {},
     ): Promise<void> {
-        await this.auth.checkPermissionOnWorkspace(userId, "stop", workspaceId);
+        if (!options.skipPermissionCheck) {
+            await this.auth.checkPermissionOnWorkspace(userId, "stop", workspaceId);
+        }
 
         const workspace = await this.doGetWorkspace(userId, workspaceId);
         const instance = await this.db.findRunningInstance(workspace.id);
@@ -335,7 +373,7 @@ export class WorkspaceService {
             return;
         }
         await this.workspaceStarter.stopWorkspaceInstance({}, instance.id, instance.region, reason, policy);
-        this.updateDeletionEligabilityTime(userId, workspaceId);
+        this.asyncUpdateDeletionEligibilityTime(userId, workspaceId, true);
     }
 
     public async stopRunningWorkspacesForUser(
@@ -356,20 +394,140 @@ export class WorkspaceService {
                     reason,
                     policy,
                 );
-                await this.updateDeletionEligabilityTime(userId, info.workspace.id);
+                this.asyncUpdateDeletionEligibilityTime(userId, info.workspace.id, false);
             }),
         );
         return infos.map((instance) => instance.workspace);
     }
 
+    private asyncUpdateDeletionEligibilityTimeForUsedPrebuild(userId: string, workspace: Workspace): void {
+        (async () => {
+            if (WithPrebuild.is(workspace.context) && workspace.context.prebuildWorkspaceId) {
+                // mark the prebuild active
+                const prebuiltWorkspace = await this.db.findPrebuiltWorkspaceById(
+                    workspace.context.prebuildWorkspaceId,
+                );
+                if (prebuiltWorkspace?.buildWorkspaceId) {
+                    await this.updateDeletionEligibilityTime(userId, prebuiltWorkspace?.buildWorkspaceId, true);
+                }
+            }
+        })().catch((err) =>
+            log.error(
+                { userId, workspaceId: workspace.id },
+                "Failed to update deletion eligibility time for prebuild",
+                err,
+            ),
+        );
+    }
+
+    private asyncStartPrebuild({
+        ctx,
+        project,
+        workspace,
+        user,
+    }: {
+        ctx: TraceContext;
+        project: Project;
+        workspace: Workspace;
+        user: User;
+    }): void {
+        (async () => {
+            const logCtx = { userId: user.id, workspaceId: workspace.id };
+            const prebuildManager = this.prebuildManager();
+
+            const context = (await this.contextParser.handle(ctx, user, workspace.contextURL)) as CommitContext;
+            const config = await prebuildManager.fetchConfig(ctx, user, context, project?.teamId);
+            const prebuildPrecondition = prebuildManager.checkPrebuildPrecondition({
+                config,
+                project,
+                context,
+            });
+            if (!prebuildPrecondition.shouldRun) {
+                log.info(logCtx, "Workspace create event: No prebuild.", { config, context });
+                return;
+            }
+
+            const res = await prebuildManager.startPrebuild(ctx, {
+                user,
+                project,
+                forcePrebuild: false,
+                context,
+                trigger: "lastWorkspaceStart",
+                assumeProjectActive: true,
+            });
+            log.info(logCtx, "starting prebuild after workspace creation", {
+                projectId: project.id,
+                projectName: scrubValue(project.name),
+                result: new TrustedValue({
+                    prebuildId: new TrustedValue(res.prebuildId),
+                    wsid: scrubValue(res.wsid),
+                    done: res.done,
+                }),
+            });
+        })().catch((err) =>
+            log.error(
+                { userId: user.id, workspaceId: workspace.id },
+                "Failed to start prebuild after workspace creation",
+                err,
+            ),
+        );
+    }
+
+    private asyncHandleUpdatePrebuildTriggerStrategy({
+        ctx,
+        project,
+        workspace,
+        user,
+    }: {
+        ctx: TraceContext;
+        project: Project;
+        workspace: Workspace;
+        user: User;
+    }): void {
+        if (project.settings?.prebuilds?.triggerStrategy === "activity-based") {
+            return;
+        }
+
+        const logCtx = { userId: user.id, workspaceId: workspace.id, projectId: project.id };
+
+        (async () => {
+            const event = await this.projectsService.getRecentWebhookEvent(ctx, user, project);
+            if (!event) {
+                await this.projectDB.updateProject({
+                    id: project.id,
+                    settings: {
+                        ...project.settings,
+                        prebuilds: {
+                            ...project.settings?.prebuilds,
+                            triggerStrategy: "activity-based",
+                        },
+                    },
+                });
+                log.info(logCtx, "Updated project prebuild trigger strategy to 'activity-based'");
+            }
+        })().catch((err) =>
+            log.error(
+                { userId: user.id, workspaceId: workspace.id },
+                "Failed to update prebuild trigger strategy after workspace creation",
+                err,
+            ),
+        );
+    }
+
+    private asyncUpdateDeletionEligibilityTime(userId: string, workspaceId: string, activeNow?: boolean): void {
+        this.updateDeletionEligibilityTime(userId, workspaceId, activeNow).catch((err) =>
+            log.error({ userId, workspaceId }, "Failed to update deletion eligibility time", err),
+        );
+    }
+
     /**
-     * Sets the deletionEligibilityTime of the workspace, depening of the current state of the workspace and the configuration.
+     * Sets the deletionEligibilityTime of the workspace, depending on the current state of the workspace and the configuration.
      *
-     * @param userId sets the
-     * @param workspaceId
+     * @param userId the user to act as
+     * @param workspaceId the workspace to update
      * @returns
      */
-    async updateDeletionEligabilityTime(userId: string, workspaceId: string): Promise<void> {
+    async updateDeletionEligibilityTime(userId: string, workspaceId: string, activeNow = false): Promise<void> {
         try {
             let daysToLive = this.config.workspaceGarbageCollection?.minAgeDays || 14;
             const daysToLiveForPrebuilds = this.config.workspaceGarbageCollection?.minAgePrebuildDays || 7;
@@ -378,10 +536,18 @@ export class WorkspaceService {
             const instance = await this.db.findCurrentInstance(workspaceId);
             const lastActive =
                 instance?.stoppingTime || instance?.startedTime || instance?.creationTime || workspace?.creationTime;
-            if (!lastActive) {
+            if (!lastActive && !activeNow) {
+                log.warn(
+                    { userId, workspaceId },
+                    "[updateDeletionEligibilityTime] No last active time found, skipping update of deletion eligibility time",
+                    {
+                        workspace,
+                        instance,
+                    },
+                );
                 return;
             }
-            const deletionEligibilityTime = new Date(lastActive);
+            const deletionEligibilityTime = activeNow ? new Date() : new Date(lastActive);
             if (workspace.type === "prebuild") {
                 // set to last active plus daysToLiveForPrebuilds as iso string
                 deletionEligibilityTime.setDate(deletionEligibilityTime.getDate() + daysToLiveForPrebuilds);
@@ -391,19 +557,61 @@ export class WorkspaceService {
                 return;
             }
             // workspaces with pending changes live twice as long
-            if (
-                (instance?.gitStatus?.totalUncommitedFiles || 0) > 0 ||
-                (instance?.gitStatus?.totalUnpushedCommits || 0) > 0 ||
-                (instance?.gitStatus?.totalUnpushedCommits || 0) > 0
-            ) {
+            const hasGitChanges =
+                instance?.gitStatus?.totalUncommitedFiles ||
+                0 > 0 ||
+                instance?.gitStatus?.totalUnpushedCommits ||
+                0 > 0 ||
+                instance?.gitStatus?.totalUntrackedFiles ||
+                0 > 0;
+            if (hasGitChanges) {
                 daysToLive = daysToLive * 2;
             }
             deletionEligibilityTime.setDate(deletionEligibilityTime.getDate() + daysToLive);
+            if (new Date().toISOString() > deletionEligibilityTime.toISOString()) {
+                log.warn(
+                    { userId, workspaceId, instanceId: instance?.id },
+                    "[updateDeletionEligibilityTime] Prevented moving deletion eligibility time to the past",
+                    {
+                        hasGitChanges,
+                        timestamps: new TrustedValue({
+                            wouldBeDeletionEligibilityTime: deletionEligibilityTime.toISOString(),
+                            currentDeletionEligibilityTime: workspace.deletionEligibilityTime,
+                            instanceStoppingTime: instance?.stoppingTime,
+                            instanceStartedTime: instance?.startedTime,
+                            instanceCreationTime: instance?.creationTime,
+                            workspaceCreationTime: workspace.creationTime,
+                            lastActive,
+                        }),
+                    },
+                );
+                return;
+            }
+
+            log.info(
+                { userId, workspaceId, instanceId: instance?.id },
+                "[updateDeletionEligibilityTime] Updating deletion eligibility time for regular workspace",
+                {
+                    hasGitChanges,
+                    timestamps: new TrustedValue({
+                        deletionEligibilityTime: deletionEligibilityTime.toISOString(),
+                        instanceStoppingTime: instance?.stoppingTime,
+                        instanceStartedTime: instance?.startedTime,
+                        instanceCreationTime: instance?.creationTime,
+                        workspaceCreationTime: workspace.creationTime,
+                        lastActive,
+                    }),
+                },
+            );
             await this.db.updatePartial(workspaceId, {
                 deletionEligibilityTime: deletionEligibilityTime.toISOString(),
             });
         } catch (error) {
-            log.error({ userId, workspaceId }, "Failed to update deletion eligibility time", error);
+            log.error(
+                { userId, workspaceId },
+                "[updateDeletionEligibilityTime] Failed to update deletion eligibility time",
+                error,
+            );
         }
     }
 
@@ -635,7 +843,7 @@ export class WorkspaceService {
         }
 
         const projectPromise = workspace.projectId
-            ? ApplicationError.notFoundToUndefined(this.projectsService.getProject(user.id, workspace.projectId))
+            ? ApplicationError.notFoundToUndefined(this.projectsService.getProject(user.id, workspace.projectId, true))
             : Promise.resolve(undefined);
 
         await mayStartPromise;
@@ -657,7 +865,7 @@ export class WorkspaceService {
 
         // at this point we're about to actually start a new workspace
         const result = await this.workspaceStarter.startWorkspace(ctx, workspace, user, await projectPromise, options);
-        await this.updateDeletionEligabilityTime(user.id, workspaceId);
+        this.asyncUpdateDeletionEligibilityTime(user.id, workspaceId, true);
         return result;
     }
 
@@ -675,11 +883,14 @@ export class WorkspaceService {
         runningInstances: Promise<WorkspaceInstance[]>,
     ): Promise<void> {
         let result: MayStartWorkspaceResult = {};
+        if (user.blocked) {
+            throw new ApplicationError(ErrorCodes.USER_BLOCKED, `User ${user.id} is blocked`);
+        }
         try {
             result = await this.entitlementService.mayStartWorkspace(user, organizationId, runningInstances);
             TraceContext.addNestedTags(ctx, { mayStartWorkspace: { result } });
         } catch (err) {
-            log.error({ userId: user.id }, "EntitlementSerivce.mayStartWorkspace error", err);
+            log.error({ userId: user.id }, "EntitlementService.mayStartWorkspace error", err);
             TraceContext.setError(ctx, err);
             return; // we don't want to block workspace starts because of internal errors
         }
@@ -695,10 +906,13 @@ export class WorkspaceService {
                 },
             );
         }
-        if (!!result.hitParallelWorkspaceLimit) {
+        if (result.hitParallelWorkspaceLimit) {
+            const { max } = result.hitParallelWorkspaceLimit;
             throw new ApplicationError(
                 ErrorCodes.TOO_MANY_RUNNING_WORKSPACES,
-                `You cannot run more than ${result.hitParallelWorkspaceLimit.max} workspaces at the same time. Please stop a workspace before starting another one.`,
+                `You cannot run more than ${max} workspace${
+                    max === 1 ? "" : "s"
+                } at the same time as per your organization settings. Please stop a workspace before starting another one.`,
             );
         }
     }
@@ -709,43 +923,28 @@ export class WorkspaceService {
         preference: WorkspaceRegion,
         clientCountryCode: string | undefined,
     ): Promise<WorkspaceRegion> {
-        const guessWorkspaceRegionEnabled = await getExperimentsClientForBackend().getValueAsync(
-            "guessWorkspaceRegion",
-            false,
-            {
-                user: { id: userId || "" },
-            },
-        );
-
-        const regionLogContext = {
-            requested_region: preference,
-            client_region_from_header: clientCountryCode,
-            experiment_enabled: false,
-            guessed_region: "",
-        };
-
         let targetRegion = preference;
         if (!isWorkspaceRegion(preference)) {
             targetRegion = "";
-        } else {
-            targetRegion = preference;
         }
 
-        if (guessWorkspaceRegionEnabled) {
-            regionLogContext.experiment_enabled = true;
-
-            if (!preference) {
-                // Attempt to identify the region based on LoadBalancer headers, if there was no explicit choice on the request.
-                // The Client region contains the two letter country code.
-                if (clientCountryCode) {
-                    targetRegion = RegionService.countryCodeToNearestWorkspaceRegion(clientCountryCode);
-                    regionLogContext.guessed_region = targetRegion;
-                }
+        let guessedRegion = "";
+        if (!preference) {
+            // Attempt to identify the region based on LoadBalancer headers, if there was no explicit choice on the request.
+            // The Client region contains the two letter country code.
+            if (clientCountryCode) {
+                targetRegion = RegionService.countryCodeToNearestWorkspaceRegion(clientCountryCode);
+                guessedRegion = targetRegion;
             }
         }
 
         const logCtx = { userId, workspaceId };
-        log.info(logCtx, "[guessWorkspaceRegion] Workspace with region selection", regionLogContext);
+        log.info(logCtx, "[guessWorkspaceRegion] Workspace with region selection", {
+            requested_region: preference,
+            client_region_from_header: clientCountryCode,
+            guessed_region: guessedRegion,
+            result: targetRegion,
+        });
 
         return targetRegion;
     }
@@ -768,16 +967,7 @@ export class WorkspaceService {
         await this.auth.checkPermissionOnWorkspace(userId, "access", workspaceId);
 
         if (!!gitStatus) {
-            const validateGitStatusLength = await getExperimentsClientForBackend().getValueAsync(
-                "api_validate_git_status_length",
-                false,
-                {
-                    user: { id: userId || "" },
-                },
-            );
-            if (validateGitStatusLength) {
-                this.validateGitStatusLength(gitStatus, GIT_STATUS_LENGTH_CAP_BYTES);
-            }
+            this.validateGitStatusLength(gitStatus, GIT_STATUS_LENGTH_CAP_BYTES);
         }
 
         let instance = await this.getCurrentInstance(userId, workspaceId);
@@ -787,7 +977,7 @@ export class WorkspaceService {
 
         const workspace = await this.doGetWorkspace(userId, workspaceId);
         instance = await this.db.updateInstancePartial(instance.id, { gitStatus });
-        await this.updateDeletionEligabilityTime(userId, workspaceId);
+        await this.updateDeletionEligibilityTime(userId, workspaceId, true);
         await this.publisher.publishInstanceUpdate({
             instanceID: instance.id,
             ownerID: workspace.ownerId,
@@ -865,6 +1055,14 @@ export class WorkspaceService {
         const workspace = await this.doGetWorkspace(userId, workspaceId);
         if (!(await this.entitlementService.maySetTimeout(userId, workspace.organizationId))) {
             throw new ApplicationError(ErrorCodes.PLAN_PROFESSIONAL_REQUIRED, "Plan upgrade is required");
+        }
+
+        const orgSettings = await this.orgService.getSettings(userId, workspace.organizationId);
+        if (!!orgSettings.timeoutSettings?.denyUserTimeouts) {
+            throw new ApplicationError(
+                ErrorCodes.PRECONDITION_FAILED,
+                "User timeouts are disabled by organization settings",
+            );
         }
 
         const instance = await this.getCurrentInstance(userId, workspaceId);
@@ -954,8 +1152,8 @@ export class WorkspaceService {
     public async streamWorkspaceLogs(
         userId: string,
         instanceId: string,
-        terminalId: string,
-        sink: (chunk: string) => Promise<void>,
+        taskIdentifier: { terminalId: string } | { taskId: string },
+        sink: (chunk: Uint8Array) => Promise<void>,
         check: () => Promise<void> = async () => {},
     ) {
         const workspace = await this.db.findByInstanceId(instanceId);
@@ -986,7 +1184,7 @@ export class WorkspaceService {
             { userId, instanceId, workspaceId: workspace!.id },
             logEndpoint,
             instanceId,
-            terminalId,
+            taskIdentifier,
             sink,
         );
     }
@@ -1027,6 +1225,9 @@ export class WorkspaceService {
                 response.status = status;
                 yield response;
             }
+        } else {
+            // we initially send an empty status update to let clients know the connection is alive
+            yield {} as WatchWorkspaceStatusResponse;
         }
         const it = this.watchWorkspaceStatus(userId, opts);
         for await (const instance of it) {
@@ -1050,7 +1251,7 @@ export class WorkspaceService {
     public async watchWorkspaceImageBuildLogs(
         userId: string,
         workspaceId: string,
-        client: Pick<GitpodClient, "onWorkspaceImageBuildLogs">,
+        receiver: (chunk: Uint8Array) => Promise<void>,
     ): Promise<void> {
         // check access
         await this.getWorkspace(userId, workspaceId);
@@ -1095,22 +1296,13 @@ export class WorkspaceService {
                 url: logInfo.url,
                 headers: logInfo.headers,
             };
-            let lineCount = 0;
             await this.headlessLogService.streamImageBuildLog(logCtx, logEndpoint, async (chunk) => {
                 if (aborted.isResolved) {
                     return;
                 }
 
                 try {
-                    chunk = chunk.replace("\n", WorkspaceImageBuild.LogLine.DELIMITER);
-                    lineCount += chunk.split(WorkspaceImageBuild.LogLine.DELIMITER_REGEX).length;
-
-                    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-                    client.onWorkspaceImageBuildLogs(undefined as any, {
-                        text: chunk,
-                        isDiff: true,
-                        upToLine: lineCount,
-                    });
+                    await receiver(chunk);
                 } catch (err) {
                     log.error("error while streaming imagebuild logs", err);
                     aborted.resolve(true);
@@ -1126,30 +1318,6 @@ export class WorkspaceService {
         } finally {
             aborted.resolve(false);
         }
-    }
-
-    public getWorkspaceImageBuildLogsIterator(userId: string, workspaceId: string, opts: { signal: AbortSignal }) {
-        return generateAsyncGenerator<string>((sink) => {
-            this.watchWorkspaceImageBuildLogs(userId, workspaceId, {
-                onWorkspaceImageBuildLogs: (_info, content) => {
-                    if (content?.text) {
-                        sink.push(content.text);
-                    }
-                },
-            })
-                .then(() => {
-                    sink.stop();
-                })
-                .catch((err) => {
-                    if (err instanceof Error) {
-                        sink.fail(err);
-                        return;
-                    } else {
-                        sink.fail(new Error(String(err) || "unknown"));
-                    }
-                });
-            return () => {};
-        }, opts);
     }
 
     public async sendHeartBeat(
@@ -1169,7 +1337,7 @@ export class WorkspaceService {
             const workspace = await this.doGetWorkspace(userId, workspaceId);
             await check(instance, workspace);
 
-            const wasClosed = !!(options && options.wasClosed);
+            const wasClosed = options.wasClosed ?? false;
             await this.db.updateLastHeartbeat(instanceId, userId, new Date(), wasClosed);
 
             const req = new MarkActiveRequest();
@@ -1236,9 +1404,17 @@ export class WorkspaceService {
         });
     }
 
-    public async validateImageRef(ctx: TraceContext, user: User, imageRef: string) {
+    public async validateImageRef(ctx: TraceContext, user: User, imageRef: string, organizationId?: string) {
         try {
-            return await this.workspaceStarter.resolveBaseImage(ctx, user, imageRef);
+            return await this.workspaceStarter.resolveBaseImage(
+                ctx,
+                user,
+                imageRef,
+                undefined,
+                undefined,
+                undefined,
+                organizationId,
+            );
         } catch (e) {
             // see https://github.com/gitpod-io/gitpod/blob/f3e41f8d86234e4101edff2199c54f50f8cbb656/components/image-builder-mk3/pkg/orchestrator/orchestrator.go#L561
             // TODO(ak) ideally we won't check a message (subject to change)
@@ -1252,8 +1428,8 @@ export class WorkspaceService {
             ) {
                 let message = details;
                 // strip confusing prefix
-                if (details.startsWith("cannt resolve base image ref: ")) {
-                    message = details.substring("cannt resolve base image ref: ".length);
+                if (details.startsWith("can't resolve base image ref: ")) {
+                    message = details.substring("can't resolve base image ref: ".length);
                 }
                 throw new ApplicationError(ErrorCodes.BAD_REQUEST, message);
             }
@@ -1353,4 +1529,11 @@ export function mapGrpcError(err: any): Error {
         default:
             return new ApplicationError(ErrorCodes.INTERNAL_SERVER_ERROR, err.details);
     }
+}
+
+function scrubValue(value: string | undefined): string | undefined {
+    if (value === undefined) {
+        return undefined;
+    }
+    return scrubber.scrubValue(value);
 }

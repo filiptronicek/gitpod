@@ -15,16 +15,13 @@ import { Separator } from "../components/Separator";
 import PillMenuItem from "../components/PillMenuItem";
 import { PaymentContext } from "../payment-context";
 import FeedbackFormModal from "../feedback-form/FeedbackModal";
-import { isGitpodIo } from "../utils";
 import OrganizationSelector from "./OrganizationSelector";
 import { getAdminTabs } from "../admin/admin.routes";
 import classNames from "classnames";
 import { User, RoleOrPermission } from "@gitpod/public-api/lib/gitpod/v1/user_pb";
 import { getPrimaryEmail } from "@gitpod/public-api-common/lib/user-utils";
-import { useHasRolePermission } from "../data/organizations/members-query";
-import { OrganizationRole } from "@gitpod/public-api/lib/gitpod/v1/organization_pb";
 import { ConfigurationsMigrationCoachmark } from "../repositories/coachmarks/MigrationCoachmark";
-import { useFeatureFlag, useHasConfigurationsAndPrebuildsEnabled } from "../data/featureflag-query";
+import { useInstallationConfiguration } from "../data/installation/installation-config-query";
 
 interface Entry {
     title: string;
@@ -37,6 +34,9 @@ export default function Menu() {
     const location = useLocation();
     const { setCurrency } = useContext(PaymentContext);
     const [isFeedbackFormVisible, setFeedbackFormVisible] = useState<boolean>(false);
+
+    const { data: installationConfig, isLoading: isInstallationConfigLoading } = useInstallationConfiguration();
+    const isGitpodIo = isInstallationConfigLoading ? false : !installationConfig?.isDedicatedInstallation;
 
     useEffect(() => {
         const { server } = getGitpodService();
@@ -98,7 +98,7 @@ export default function Menu() {
                                         />
                                     </li>
                                 )}
-                                {isGitpodIo() && (
+                                {isGitpodIo && (
                                     <li className="cursor-pointer">
                                         <PillMenuItem name="Feedback" onClick={handleFeedbackFormClick} />
                                     </li>
@@ -128,33 +128,19 @@ export default function Menu() {
     );
 }
 
+const leftMenu: Entry[] = [
+    {
+        title: "Workspaces",
+        link: "/workspaces",
+        alternatives: ["/"],
+    },
+];
+
 type OrgPagesNavProps = {
     className?: string;
 };
 const OrgPagesNav: FC<OrgPagesNavProps> = ({ className }) => {
     const location = useLocation();
-    const hasMemberPermission = useHasRolePermission(OrganizationRole.MEMBER);
-    const configurationsEnabled = useHasConfigurationsAndPrebuildsEnabled();
-    const prebuildsInMenu = useFeatureFlag("showPrebuildsMenuItem");
-
-    const leftMenu: Entry[] = useMemo(() => {
-        const menus = [
-            {
-                title: "Workspaces",
-                link: "/workspaces",
-                alternatives: ["/"],
-            },
-        ];
-        // collaborators can't access projects
-        if (hasMemberPermission && (!configurationsEnabled || !prebuildsInMenu)) {
-            menus.push({
-                title: "Projects",
-                link: `/projects`,
-                alternatives: [] as string[],
-            });
-        }
-        return menus;
-    }, [configurationsEnabled, hasMemberPermission, prebuildsInMenu]);
 
     return (
         <div
@@ -180,6 +166,9 @@ type UserMenuProps = {
     onFeedback?: () => void;
 };
 const UserMenu: FC<UserMenuProps> = ({ user, className, withAdminLink, withFeedbackLink, onFeedback }) => {
+    const { data: installationConfig, isLoading: isInstallationConfigLoading } = useInstallationConfiguration();
+    const isGitpodIo = isInstallationConfigLoading ? false : !installationConfig?.isDedicatedInstallation;
+
     const extraSection = useMemo(() => {
         const items: ContextMenuEntry[] = [];
 
@@ -189,7 +178,7 @@ const UserMenu: FC<UserMenuProps> = ({ user, className, withAdminLink, withFeedb
                 link: "/admin",
             });
         }
-        if (withFeedbackLink && isGitpodIo()) {
+        if (withFeedbackLink && isGitpodIo) {
             items.push({
                 title: "Feedback",
                 onClick: onFeedback,
@@ -202,7 +191,7 @@ const UserMenu: FC<UserMenuProps> = ({ user, className, withAdminLink, withFeedb
         }
 
         return items;
-    }, [onFeedback, user?.rolesOrPermissions, withAdminLink, withFeedbackLink]);
+    }, [isGitpodIo, onFeedback, user?.rolesOrPermissions, withAdminLink, withFeedbackLink]);
 
     const menuEntries = useMemo(() => {
         return [
@@ -217,7 +206,7 @@ const UserMenu: FC<UserMenuProps> = ({ user, className, withAdminLink, withFeedb
             },
             {
                 title: "Docs",
-                href: "https://www.gitpod.io/docs/",
+                href: "https://www.gitpod.io/docs/introduction",
                 target: "_blank",
                 rel: "noreferrer",
             },

@@ -23,7 +23,7 @@ import {
     DescribeClusterRequest,
     WorkspaceType,
 } from "@gitpod/ws-manager/lib";
-import { TrustedValue } from "@gitpod/gitpod-protocol/lib/util/scrubbing";
+import { scrubber, TrustedValue } from "@gitpod/gitpod-protocol/lib/util/scrubbing";
 import { WorkspaceDB } from "@gitpod/gitpod-db/lib/workspace-db";
 import { log, LogContext } from "@gitpod/gitpod-protocol/lib/util/logging";
 import { TraceContext } from "@gitpod/gitpod-protocol/lib/util/tracing";
@@ -193,7 +193,7 @@ export class WorkspaceManagerBridge implements Disposable {
     ) {
         const start = performance.now();
         const status = rawStatus.toObject();
-        log.info("Handling WorkspaceStatus update", filterStatus(status));
+        log.info("Handling WorkspaceStatus update", { status: new TrustedValue(filterStatus(status)) });
 
         if (!status.spec || !status.metadata || !status.conditions) {
             log.warn("Received invalid status update", status);
@@ -316,6 +316,11 @@ export class WorkspaceManagerBridge implements Disposable {
             }
             instance.status.conditions.pullingImages = toBool(status.conditions.pullingImages!);
             instance.status.conditions.deployed = toBool(status.conditions.deployed);
+            if (!instance.deployedTime && instance.status.conditions.deployed) {
+                // This is the first time we see the workspace pod being deployed.
+                // Like all other timestamps, it's set when bridge observes it, not when it actually happened (which only ws-manager could decide).
+                instance.deployedTime = new Date().toISOString();
+            }
             instance.status.conditions.timeout = status.conditions.timeout;
             instance.status.conditions.firstUserActivity = mapFirstUserActivity(
                 rawStatus.getConditions()!.getFirstUserActivity(),
@@ -327,6 +332,13 @@ export class WorkspaceManagerBridge implements Disposable {
             instance.status.podName = instance.status.podName || status.runtime?.podName;
             instance.status.nodeIp = instance.status.nodeIp || status.runtime?.nodeIp;
             instance.status.ownerToken = status.auth!.ownerToken;
+            instance.status.metrics = {
+                image: {
+                    totalSize: instance.status.metrics?.image?.totalSize || status.metadata.metrics?.image?.totalSize,
+                    workspaceImageSize:
+                        instance.status.metrics?.image?.totalSize || status.metadata.metrics?.image?.workspaceImageSize,
+                },
+            };
 
             let lifecycleHandler: (() => Promise<void>) | undefined;
             switch (status.phase) {
@@ -394,10 +406,10 @@ export class WorkspaceManagerBridge implements Disposable {
 
             span.setTag("after", JSON.stringify(instance));
 
+            await this.workspaceDB.trace(ctx).storeInstance(instance);
+
             // now notify all prebuild listeners about updates - and update DB if needed
             await this.prebuildUpdater.updatePrebuiltWorkspace({ span }, userId, status);
-
-            await this.workspaceDB.trace(ctx).storeInstance(instance);
 
             // cleanup
             // important: call this after the DB update
@@ -457,11 +469,11 @@ const mapPortProtocol = (protocol: WsManPortProtocol): PortProtocol => {
 export const filterStatus = (status: WorkspaceStatus.AsObject): Partial<WorkspaceStatus.AsObject> => {
     return {
         id: status.id,
-        metadata: status.metadata,
+        metadata: scrubber.scrub(status.metadata),
         phase: status.phase,
         message: status.message,
-        conditions: new TrustedValue(status.conditions).value,
-        runtime: new TrustedValue(status.runtime).value,
+        conditions: status.conditions,
+        runtime: status.runtime,
     };
 };
 

@@ -33,7 +33,6 @@ import { Blocked } from "./Blocked";
 import { BlockedRepositories } from "../admin/BlockedRepositories";
 import PersonalAccessTokenCreateView from "../user-settings/PersonalAccessTokensCreateView";
 import { CreateWorkspacePage } from "../workspaces/CreateWorkspacePage";
-import { WebsocketClients } from "./WebsocketClients";
 import { BlockedEmailDomains } from "../admin/BlockedEmailDomains";
 import { AppNotifications } from "../AppNotifications";
 import { projectsPathInstallGitHubApp } from "../projects/projects.routes";
@@ -61,14 +60,9 @@ const TeamUsageBasedBilling = React.lazy(() => import(/* webpackPrefetch: true *
 const SSO = React.lazy(() => import(/* webpackPrefetch: true */ "../teams/SSO"));
 const TeamGitIntegrations = React.lazy(() => import(/* webpackPrefetch: true */ "../teams/GitIntegrationsPage"));
 const TeamPolicies = React.lazy(() => import(/* webpackPrefetch: true */ "../teams/TeamPolicies"));
+const TeamOnboarding = React.lazy(() => import(/* webpackPrefetch: true */ "../teams/TeamOnboarding"));
 const TeamNetworking = React.lazy(() => import(/* webpackPrefetch: true */ "../teams/TeamNetworking"));
 const TeamAuthentication = React.lazy(() => import(/* webpackPrefetch: true */ "../teams/TeamAuthentication"));
-const Projects = React.lazy(() => import(/* webpackPrefetch: true */ "../projects/Projects"));
-const Project = React.lazy(() => import(/* webpackPrefetch: true */ "../projects/Project"));
-const ProjectSettings = React.lazy(() => import(/* webpackPrefetch: true */ "../projects/ProjectSettings"));
-const ProjectVariables = React.lazy(() => import(/* webpackPrefetch: true */ "../projects/ProjectVariables"));
-const Prebuilds = React.lazy(() => import(/* webpackPrefetch: true */ "../projects/Prebuilds"));
-const Prebuild = React.lazy(() => import(/* webpackPrefetch: true */ "../projects/Prebuild"));
 const InstallGitHubApp = React.lazy(() => import(/* webpackPrefetch: true */ "../projects/InstallGitHubApp"));
 const FromReferrer = React.lazy(() => import(/* webpackPrefetch: true */ "../FromReferrer"));
 const UserSearch = React.lazy(() => import(/* webpackPrefetch: true */ "../admin/UserSearch"));
@@ -76,6 +70,7 @@ const WorkspacesSearch = React.lazy(() => import(/* webpackPrefetch: true */ "..
 const ProjectsSearch = React.lazy(() => import(/* webpackPrefetch: true */ "../admin/ProjectsSearch"));
 const TeamsSearch = React.lazy(() => import(/* webpackPrefetch: true */ "../admin/TeamsSearch"));
 const Usage = React.lazy(() => import(/* webpackPrefetch: true */ "../Usage"));
+const Insights = React.lazy(() => import(/* webpackPrefetch: true */ "../Insights"));
 const ConfigurationListPage = React.lazy(
     () => import(/* webpackPrefetch: true */ "../repositories/list/RepositoryList"),
 );
@@ -83,7 +78,7 @@ const ConfigurationDetailPage = React.lazy(
     () => import(/* webpackPrefetch: true */ "../repositories/detail/ConfigurationDetailPage"),
 );
 
-const PrebuildListPage = React.lazy(() => import(/* webpackPrefetch: true */ "../prebuilds/list/PrebuildList"));
+const PrebuildListPage = React.lazy(() => import(/* webpackPrefetch: true */ "../prebuilds/list/PrebuildListPage"));
 
 export const AppRoutes = () => {
     const hash = getURLHash();
@@ -132,7 +127,6 @@ export const AppRoutes = () => {
                             <Route path="/open">
                                 <Redirect to="/new" />
                             </Route>
-                            {/* TODO(gpl): Remove once we don't need the redirect anymore */}
                             <Route
                                 path={[
                                     switchToPAYGPathMain,
@@ -150,6 +144,7 @@ export const AppRoutes = () => {
                             <Route path={workspacesPathMain} exact component={Workspaces} />
                             <Route path={settingsPathAccount} exact component={Account} />
                             <Route path={usagePathMain} exact component={Usage} />
+                            <Route path={"/insights"} exact component={Insights} />
                             <Route path={settingsPathIntegrations} exact component={Integrations} />
                             <Route path={settingsPathNotifications} exact component={Notifications} />
                             <Route path={settingsPathVariables} exact component={EnvironmentVariables} />
@@ -198,24 +193,18 @@ export const AppRoutes = () => {
                             </Route>
                             <Route exact path="/orgs/new" component={NewTeam} />
                             <Route exact path="/orgs/join" component={JoinTeam} />
-                            <Route exact path="/projects" component={Projects} />
 
                             {/* These routes that require a selected organization, otherwise they redirect to "/" */}
                             <Route exact path="/members" component={Members} />
                             <Route exact path="/settings" component={TeamSettings} />
                             <Route exact path="/settings/git" component={TeamGitIntegrations} />
                             <Route exact path="/settings/policy" component={TeamPolicies} />
+                            <Route exact path="/settings/onboarding" component={TeamOnboarding} />
                             <Route exact path="/settings/networking" component={TeamNetworking} />
                             <Route exact path="/settings/auth" component={TeamAuthentication} />
                             {/* TODO: migrate other org settings pages underneath /settings prefix so we can utilize nested routes */}
                             <Route exact path="/billing" component={TeamUsageBasedBilling} />
                             <Route exact path="/sso" component={SSO} />
-
-                            <Route exact path={`/projects/:projectSlug`} component={Project} />
-                            <Route exact path={`/projects/:projectSlug/prebuilds`} component={Prebuilds} />
-                            <Route exact path={`/projects/:projectSlug/settings`} component={ProjectSettings} />
-                            <Route exact path={`/projects/:projectSlug/variables`} component={ProjectVariables} />
-                            <Route exact path={`/projects/:projectSlug/:prebuildId`} component={Prebuild} />
 
                             <Route exact path={`/prebuilds`} component={PrebuildListPage} />
                             <Route path="/prebuilds/:prebuildId" component={PrebuildDetailPage} />
@@ -224,8 +213,11 @@ export const AppRoutes = () => {
                             <Route path="/repositories/:id" component={ConfigurationDetailPage} />
 
                             {/* basic redirect for old team slugs */}
-                            <Route path={["/t/"]} exact>
-                                <Redirect to="/projects" />
+                            <Route path={"/t/"} exact>
+                                <Redirect to="/repositories" />
+                            </Route>
+                            <Route path={"/projects/"}>
+                                <Redirect to="/repositories" />
                             </Route>
                             {/* redirect for old user settings slugs */}
                             <Route path="/account" exact>
@@ -273,7 +265,6 @@ export const AppRoutes = () => {
                             />
                         </Switch>
                     </div>
-                    <WebsocketClients />
                 </Route>
             </Switch>
         </Route>

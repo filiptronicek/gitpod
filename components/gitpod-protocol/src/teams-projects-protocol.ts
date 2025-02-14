@@ -7,6 +7,7 @@
 import { PrebuiltWorkspaceState, Workspace, WorkspaceClasses } from "./protocol";
 import { v4 as uuidv4 } from "uuid";
 import { DeepPartial } from "./util/deep-partial";
+import { WorkspaceInstance } from "./workspace-instance";
 
 export interface ProjectConfig {
     ".gitpod.yml": string;
@@ -27,9 +28,18 @@ export interface ProjectSettings {
     restrictedWorkspaceClasses?: string[];
 
     restrictedEditorNames?: string[];
+
+    /**
+     * Enable automatic authentication for docker daemon with all credentials specified in GITPOD_IMAGE_AUTH
+     */
+    enableDockerdAuthentication?: boolean;
 }
 export namespace PrebuildSettings {
     export type BranchStrategy = "default-branch" | "all-branches" | "matched-branches";
+    export type TriggerStrategy = "activity-based" | "webhook-based";
+    export interface CloneSettings {
+        fullClone?: boolean;
+    }
 }
 
 export interface PrebuildSettings {
@@ -54,6 +64,13 @@ export interface PrebuildSettings {
      * Preferred workspace class for prebuilds.
      */
     workspaceClass?: string;
+
+    /**
+     * The activation strategy for prebuilds. Defaults to "webhook-based"
+     */
+    triggerStrategy?: PrebuildSettings.TriggerStrategy;
+
+    cloneSettings?: PrebuildSettings.CloneSettings;
 }
 
 export interface Project {
@@ -87,6 +104,7 @@ export namespace Project {
         branchMatchingPattern: "**",
         prebuildInterval: 20,
         branchStrategy: "all-branches",
+        triggerStrategy: "activity-based",
     };
 
     /**
@@ -149,6 +167,7 @@ export interface PrebuildWithStatus {
     info: PrebuildInfo;
     status: PrebuiltWorkspaceState;
     workspace: Workspace;
+    instance?: WorkspaceInstance;
     error?: string;
 }
 
@@ -214,15 +233,66 @@ export interface OrganizationSettings {
 
     // what role new members will get, default is "member"
     defaultRole?: OrgMemberRole;
+
+    // the default organization-wide timeout settings for workspaces
+    timeoutSettings?: TimeoutSettings;
+
+    roleRestrictions?: RoleRestrictions;
+
+    // max number of parallel running workspaces per user
+    maxParallelRunningWorkspaces?: number;
+
+    // onboarding settings for the organization
+    onboardingSettings?: OnboardingSettings;
+
+    // whether to add a special annotation to commits that are created through Gitpod
+    annotateGitCommits?: boolean;
 }
 
+export type TimeoutSettings = {
+    // default per-org workspace timeout
+    inactivity?: string;
+
+    // If this field is true, workspaces neither a) pick up user-defined workspace timeouts, nor b) members can set custom timeouts during workspace runtime.
+    denyUserTimeouts?: boolean;
+};
+
+export const VALID_ORG_MEMBER_ROLES = ["owner", "member", "collaborator"] as const;
+
 export type TeamMemberRole = OrgMemberRole;
-export type OrgMemberRole = "owner" | "member" | "collaborator";
+export type OrgMemberRole = typeof VALID_ORG_MEMBER_ROLES[number];
+
+export type OrgMemberPermission = "start_arbitrary_repositories";
+export type RoleRestrictions = Partial<Record<OrgMemberRole, OrgMemberPermission[]>>;
 
 export namespace TeamMemberRole {
-    export function isValid(role: any): role is TeamMemberRole {
-        return role === "owner" || role === "member" || role === "collaborator";
+    export function isValid(role: unknown): role is TeamMemberRole {
+        return VALID_ORG_MEMBER_ROLES.includes(role as TeamMemberRole);
     }
+}
+
+export interface OnboardingSettings {
+    /**
+     * the link to an internal onboarding page for the organization, possibly featuring a custom onboarding guide and other resources
+     */
+    internalLink?: string;
+
+    /**
+     * the repository IDs of the repositories that are recommended for members to start with
+     */
+    recommendedRepositories?: string[];
+
+    /**
+     * the welcome message for new members of the organization
+     */
+    welcomeMessage?: WelcomeMessage;
+}
+
+export interface WelcomeMessage {
+    enabled?: boolean;
+    featuredMemberId?: string;
+    featuredMemberResolvedAvatarUrl?: string;
+    message?: string;
 }
 
 export type TeamMemberInfo = OrgMemberInfo;

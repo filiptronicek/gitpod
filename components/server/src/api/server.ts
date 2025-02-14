@@ -15,6 +15,7 @@ import { StatsService } from "@gitpod/public-api/lib/gitpod/experimental/v1/stat
 import { TeamsService as TeamsServiceDefinition } from "@gitpod/public-api/lib/gitpod/experimental/v1/teams_connect";
 import { OrganizationService } from "@gitpod/public-api/lib/gitpod/v1/organization_connect";
 import { WorkspaceService } from "@gitpod/public-api/lib/gitpod/v1/workspace_connect";
+import { AuditLogService as AuditLogServiceFromAPI } from "@gitpod/public-api/lib/gitpod/v1/auditlogs_connect";
 import { UserService } from "@gitpod/public-api/lib/gitpod/v1/user_connect";
 import { ConfigurationService } from "@gitpod/public-api/lib/gitpod/v1/configuration_connect";
 import { AuthProviderService } from "@gitpod/public-api/lib/gitpod/v1/authprovider_connect";
@@ -26,7 +27,6 @@ import { AddressInfo } from "net";
 import { performance } from "perf_hooks";
 import { RateLimiterRes } from "rate-limiter-flexible";
 import { v4 } from "uuid";
-import { isFgaChecksEnabled } from "../authorization/authorizer";
 import { Config } from "../config";
 import { grpcServerHandled, grpcServerHandling, grpcServerStarted } from "../prometheus-metrics";
 import { SessionHandler } from "../session-handler";
@@ -63,6 +63,9 @@ import { InstallationService } from "@gitpod/public-api/lib/gitpod/v1/installati
 import { RateLimitter } from "../rate-limitter";
 import { TokenServiceAPI } from "./token-service-api";
 import { TokenService } from "@gitpod/public-api/lib/gitpod/v1/token_connect";
+import { AuditLogService } from "../audit/AuditLogService";
+import { AuditLogServiceAPI } from "./audit-log-service-api";
+import { getExperimentsClientForBackend } from "@gitpod/gitpod-protocol/lib/experiments/configcat-server";
 
 decorate(injectable(), PublicAPIConverter);
 
@@ -84,6 +87,7 @@ export class API {
     @inject(SSHServiceAPI) private readonly sshServiceApi: SSHServiceAPI;
     @inject(StatsServiceAPI) private readonly tatsServiceApi: StatsServiceAPI;
     @inject(HelloServiceAPI) private readonly helloServiceApi: HelloServiceAPI;
+    @inject(AuditLogServiceAPI) private readonly auditLogServiceApi: AuditLogServiceAPI;
     @inject(SessionHandler) private readonly sessionHandler: SessionHandler;
     @inject(PublicAPIConverter) private readonly apiConverter: PublicAPIConverter;
     @inject(Config) private readonly config: Config;
@@ -93,6 +97,7 @@ export class API {
     @inject(VerificationServiceAPI) private readonly verificationServiceApi: VerificationServiceAPI;
     @inject(InstallationServiceAPI) private readonly installationServiceApi: InstallationServiceAPI;
     @inject(RateLimitter) private readonly rateLimitter: RateLimitter;
+    @inject(AuditLogService) private readonly auditLogService: AuditLogService;
 
     listenPrivate(): http.Server {
         const app = express();
@@ -145,6 +150,7 @@ export class API {
                         service(PrebuildService, this.prebuildServiceApi),
                         service(VerificationService, this.verificationServiceApi),
                         service(InstallationService, this.installationServiceApi),
+                        service(AuditLogServiceFromAPI, this.auditLogServiceApi),
                     ]) {
                         router.service(type, new Proxy(impl, this.interceptService(type)));
                     }
@@ -279,7 +285,7 @@ export class API {
                             await rateLimit(subjectId.toString());
                             await self.ensureFgaMigration(subjectId);
                         }
-                        // TODO(at) if unauthenticated, we still need to apply enforece a rate limit
+                        // TODO(at) if unauthenticated, we still need to apply enforce a rate limit
 
                         return subjectId;
                     };
@@ -289,6 +295,22 @@ export class API {
                     };
                     if (grpc_type === "unary" || grpc_type === "client_stream") {
                         return withRequestContext(async () => {
+                            const isCellDisabled = await getExperimentsClientForBackend().getValueAsync(
+                                "cell_disabled",
+                                false,
+                                {},
+                            );
+                            if (
+                                isCellDisabled &&
+                                requestContext.requestMethod === "gitpod.v1.UserService/getAuthenticatedUser"
+                            ) {
+                                const error = self.apiConverter.toError(
+                                    new ApplicationError(ErrorCodes.CELL_EXPIRED, "Cell is disabled"),
+                                );
+                                done(error);
+                                throw error;
+                            }
+
                             let subjectId: SubjectId | undefined = undefined;
                             try {
                                 subjectId = await auth();
@@ -300,6 +322,13 @@ export class API {
                                 try {
                                     const promise = await apply<Promise<any>>();
                                     const result = await promise;
+                                    if (subjectId) {
+                                        self.auditLogService.asyncRecordAuditLog(
+                                            subjectId!.userId()!,
+                                            requestContext.requestMethod,
+                                            [args[0]],
+                                        );
+                                    }
                                     done();
                                     return result;
                                 } catch (e) {
@@ -366,11 +395,6 @@ export class API {
     }
 
     private async ensureFgaMigration(subjectId: SubjectId): Promise<void> {
-        const fgaChecksEnabled = await isFgaChecksEnabled(subjectId);
-        if (!fgaChecksEnabled) {
-            throw new ConnectError("unauthorized", Code.PermissionDenied);
-        }
-
         if (subjectId.kind === "user") {
             const userId = subjectId.userId()!;
             try {
@@ -394,6 +418,7 @@ export class API {
         bind(TokenServiceAPI).toSelf().inSingletonScope();
         bind(ConfigurationServiceAPI).toSelf().inSingletonScope();
         bind(AuthProviderServiceAPI).toSelf().inSingletonScope();
+        bind(AuditLogServiceAPI).toSelf().inSingletonScope();
         bind(EnvironmentVariableServiceAPI).toSelf().inSingletonScope();
         bind(ScmServiceAPI).toSelf().inSingletonScope();
         bind(SSHServiceAPI).toSelf().inSingletonScope();

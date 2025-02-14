@@ -27,7 +27,7 @@ import { PaginationToken, generatePaginationToken, parsePaginationToken } from "
 import { ctxUserId } from "../util/request-context";
 import { UserService } from "../user/user-service";
 import { SortOrder } from "@gitpod/public-api/lib/gitpod/v1/sorting_pb";
-import { Project } from "@gitpod/gitpod-protocol";
+import { CommitContext, Project } from "@gitpod/gitpod-protocol";
 import { DeepPartial } from "@gitpod/gitpod-protocol/lib/util/deep-partial";
 import { ContextService } from "../workspace/context-service";
 
@@ -76,18 +76,20 @@ export class ConfigurationServiceAPI implements ServiceImpl<typeof Configuration
             throw new ApplicationError(ErrorCodes.NOT_FOUND, "user not found");
         }
 
-        const cloneUrl = await this.contextService.parseContextUrlAsCloneUrl(installer, req.cloneUrl);
-        if (!cloneUrl) {
+        const context = await this.contextService.parseContextUrl(installer, req.cloneUrl);
+        if (!CommitContext.is(context)) {
             throw new ApplicationError(ErrorCodes.BAD_REQUEST, "clone_url is not valid");
         }
+
+        // The dashboard, for example, does not provide an explicit name, so we infer it
+        const name = req.name || (context.repository.displayName ?? context.repository.name);
 
         const project = await this.projectService.createProject(
             {
                 teamId: req.organizationId,
-                name: req.name,
-                cloneUrl,
+                name,
+                cloneUrl: context.repository.cloneUrl,
                 appInstallationId: "",
-                slug: "",
             },
             installer,
         );
@@ -194,6 +196,9 @@ export class ConfigurationServiceAPI implements ServiceImpl<typeof Configuration
         }
 
         if (req.workspaceSettings !== undefined) {
+            // TODO(gpl): What is this? Why do we invent the 4th place to to a shape translation, when there should be only 1?
+            // The only reason to not re-do all of the API handling here is bc of our Classic timeline... and I'm not sure it's
+            // a good enough excuse.
             update.workspaceSettings = {};
             if (req.workspaceSettings.workspaceClass !== undefined) {
                 update.workspaceSettings.workspaceClass = req.workspaceSettings.workspaceClass;
@@ -214,6 +219,7 @@ export class ConfigurationServiceAPI implements ServiceImpl<typeof Configuration
                     "updateRestrictedEditorNames is required to be true to update restrictedEditorNames",
                 );
             }
+            update.workspaceSettings.enableDockerdAuthentication = req.workspaceSettings.enableDockerdAuthentication;
         }
 
         if (Object.keys(update).length <= 1) {

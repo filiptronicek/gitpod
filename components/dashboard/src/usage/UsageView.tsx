@@ -24,19 +24,12 @@ import classNames from "classnames";
 import { UsageDateFilters } from "./UsageDateFilters";
 import { DownloadUsage } from "./download/DownloadUsage";
 import { useQueryParams } from "../hooks/use-query-params";
-import { useFeatureFlag } from "../data/featureflag-query";
 
 const DATE_PARAM_FORMAT = "YYYY-MM-DD";
 
 interface UsageViewProps {
     attributionId: AttributionId;
 }
-
-const durationUnitMap: Record<string, string | undefined> = {
-    s: "seconds",
-    m: "minutes",
-    h: "hours",
-};
 
 export const UsageView: FC<UsageViewProps> = ({ attributionId }) => {
     const location = useLocation();
@@ -80,7 +73,7 @@ export const UsageView: FC<UsageViewProps> = ({ attributionId }) => {
         [updatePageParams],
     );
 
-    let errorMessage = useMemo(() => {
+    const errorMessage = useMemo(() => {
         let errorMessage = "";
 
         if (usagePage.error) {
@@ -94,28 +87,27 @@ export const UsageView: FC<UsageViewProps> = ({ attributionId }) => {
         return errorMessage;
     }, [usagePage.error]);
 
-    const usageEntries = usagePage.data?.usageEntriesList || [];
-
-    const schedulerDuration = useFeatureFlag("usage_update_scheduler_duration");
+    const usageEntries = usagePage.data?.usageEntriesList ?? [];
 
     const readableSchedulerDuration = useMemo(() => {
-        const duration = schedulerDuration.toString().toLowerCase();
-        if (duration === "undefined") {
-            return "15 minutes";
+        const intervalMinutes = usagePage.data?.ledgerIntervalMinutes;
+        if (!intervalMinutes) {
+            return "";
         }
-        const unit = duration.slice(-1);
-        const unitStr = durationUnitMap[unit];
-        if (!unitStr) {
-            console.error("failed to parse duration", duration);
-            return "15 minutes";
-        }
-        const value = parseInt(duration.slice(0, -1), 10);
-        return `${value} ${unitStr}`;
-    }, [schedulerDuration]);
+
+        return `${intervalMinutes} minute${intervalMinutes !== 1 ? "s" : ""}`;
+    }, [usagePage.data]);
 
     return (
         <>
-            <Header title="Usage" subtitle={"Organization usage, updated every " + readableSchedulerDuration + "."} />
+            <Header
+                title="Usage"
+                subtitle={
+                    "Organization usage" +
+                    (readableSchedulerDuration ? ", updated every " + readableSchedulerDuration : "") +
+                    "."
+                }
+            />
             <div className="app-container pt-5">
                 <div
                     className={classNames(
@@ -137,7 +129,7 @@ export const UsageView: FC<UsageViewProps> = ({ attributionId }) => {
 
                 <div className="flex flex-col w-full mb-8">
                     <ItemsList className="mt-2 text-gray-400 dark:text-gray-500">
-                        <Item header={false} className="grid grid-cols-12 gap-x-3 bg-gray-100 dark:bg-gray-800">
+                        <Item header={false} className="grid grid-cols-12 gap-x-3 bg-pk-surface-secondary">
                             <ItemField className="col-span-2 my-auto ">
                                 <span>Type</span>
                             </ItemField>
